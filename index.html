@@ -1,39 +1,72 @@
 <!DOCTYPE html>
 <html>
-<body style="background: black; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; overflow: hidden;">
-    <div id="light" style="width: 200px; height: 200px; background: white; border-radius: 10px;"></div>
-    <button id="start" style="position: absolute; padding: 20px;">Start Capturing Audio</button>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { margin: 0; background: #111; color: white; text-align: center; font-family: sans-serif; }
+        video { width: 100%; max-height: 70vh; object-fit: cover; }
+        #canvas { display: none; }
+        .guide { position: absolute; top: 25%; left: 25%; width: 50%; height: 20%; border: 2px solid cyan; pointer-events: none; }
+    </style>
+</head>
+<body>
+    <video id="video" autoplay playsinline></video>
+    <div class="guide"></div>
+    <button id="enable" style="padding: 20px; margin-top: 20px;">Initialize Sensor</button>
+    <p>Intensity: <span id="val">0</span></p>
+
+    <canvas id="canvas"></canvas>
 
     <script>
-        const light = document.getElementById('light');
-        const startBtn = document.getElementById('start');
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const valDisp = document.getElementById('val');
+        
+        let audioCtx, oscillator, gainNode;
 
-        startBtn.onclick = async () => {
-            // Captures system audio via screen sharing stream
-            const stream = await navigator.mediaDevices.getDisplayMedia({
-                video: true, audio: true
+        document.getElementById('enable').onclick = async () => {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            
+            // Setup a simple synth tone
+            oscillator = audioCtx.createOscillator();
+            gainNode = audioCtx.createGain();
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            oscillator.start();
+            gainNode.gain.value = 0;
+
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: 'environment', frameRate: 60 } 
             });
-            startBtn.style.display = 'none';
-
-            const audioContext = new AudioContext();
-            const source = audioContext.createMediaStreamSource(stream);
-            const analyzer = audioContext.createAnalyser();
-            analyzer.fftSize = 256;
-            source.connect(analyzer);
-
-            const dataArray = new Uint8Array(analyzer.frequencyBinCount);
-
-            function draw() {
-                analyzer.getByteFrequencyData(dataArray);
-                // Get average volume (roughly)
-                let avg = dataArray.reduce((a, b) => a + b) / dataArray.length;
-                // Amplify the effect for the light
-                let brightness = Math.min(255, avg * 3);
-                light.style.backgroundColor = `rgb(${brightness}, ${brightness}, ${brightness})`;
-                requestAnimationFrame(draw);
-            }
-            draw();
+            video.srcObject = stream;
+            process();
         };
+
+        function process() {
+            if (video.paused || video.ended) return;
+
+            // Draw current frame to hidden canvas
+            canvas.width = video.videoWidth / 4; // Downsample for speed
+            canvas.height = video.videoHeight / 4;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // Sample the center area (the guide box)
+            const data = ctx.getImageData(canvas.width*0.4, canvas.height*0.4, canvas.width*0.2, canvas.height*0.2).data;
+            
+            let total = 0;
+            for (let i = 0; i < data.length; i += 4) {
+                total += (data[i] + data[i+1] + data[i+2]) / 3;
+            }
+            let avgBrightness = total / (data.length / 4);
+            
+            // Map brightness to volume and pitch
+            valDisp.innerText = Math.round(avgBrightness);
+            gainNode.gain.setTargetAtTime(avgBrightness / 255, audioCtx.currentTime, 0.03);
+            oscillator.frequency.setTargetAtTime(200 + (avgBrightness * 2), audioCtx.currentTime, 0.03);
+
+            requestAnimationFrame(process);
+        }
     </script>
 </body>
 </html>
