@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Optical Vocoder Receiver</title>
+    <title>Optical Vocoder Receiver v2</title>
     <style>
         body { 
             margin: 0; 
@@ -12,75 +12,72 @@
             font-family: 'Courier New', monospace; 
             overflow: hidden; 
         }
-        /* Video fills the screen */
         video { 
             position: absolute; 
-            top: 0; 
-            left: 0; 
-            width: 100%; 
-            height: 100%; 
+            top: 0; left: 0; width: 100%; height: 100%; 
             object-fit: cover; 
-            filter: contrast(1.2) brightness(1.1); /* Slight boost to help detection */
+            filter: contrast(1.2) brightness(1.1); 
         }
-        
-        /* The Overlay Canvas (for red boxes) sits on top */
         #overlay { 
-            position: absolute; 
-            top: 0; 
-            left: 0; 
-            width: 100%; 
-            height: 100%; 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
             pointer-events: none; 
         }
         
-        /* UI Elements */
+        /* UI Panel */
         #ui { 
             position: absolute; 
-            top: 10px; 
-            left: 10px; 
+            top: 10px; left: 10px; 
             z-index: 10; 
-            background: rgba(0,0,0,0.6); 
-            padding: 5px 10px; 
+            background: rgba(0,0,0,0.7); 
+            padding: 10px; 
             border: 1px solid #0f0;
-            pointer-events: none; 
+            border-radius: 5px;
         }
-        #fps { font-weight: bold; font-size: 16px; }
-        #status { font-size: 12px; color: #aaa; margin-top: 2px; }
+        
+        #fps { font-weight: bold; font-size: 14px; margin-bottom: 5px; }
+        #status { font-size: 11px; color: #aaa; margin-bottom: 10px; }
 
-        /* Start Button */
+        /* The New Dropdown Selector */
+        select {
+            background: #222;
+            color: #fff;
+            border: 1px solid #0f0;
+            padding: 5px;
+            font-family: monospace;
+            font-size: 14px;
+            width: 100%;
+        }
+
         #startBtn { 
-            position: absolute; 
-            bottom: 50px; 
-            left: 50%; 
-            transform: translateX(-50%); 
-            padding: 20px 40px; 
-            font-size: 20px; 
-            font-weight: bold; 
-            background: #0f0; 
-            color: #000;
-            border: none; 
-            cursor: pointer; 
-            z-index: 20; 
-            box-shadow: 0 0 15px #0f0;
+            position: absolute; bottom: 50px; left: 50%; transform: translateX(-50%); 
+            padding: 20px 40px; font-size: 20px; font-weight: bold; 
+            background: #0f0; color: #000; border: none; cursor: pointer; 
+            z-index: 20; box-shadow: 0 0 15px #0f0; border-radius: 5px;
         }
     </style>
 </head>
 <body>
 
     <video id="video" autoplay playsinline muted></video>
-    
     <canvas id="overlay"></canvas>
     
     <div id="ui">
         <div id="fps">FPS: 0</div>
-        <div id="status">Ready to initialize</div>
+        <div id="status">Ready...</div>
+        
+        <label style="font-size:12px;">VOICE TYPE:</label><br>
+        <select id="waveSelect">
+            <option value="square">Harmonica (Square)</option>
+            <option value="sawtooth">Robot Voice (Saw)</option>
+            <option value="sine">Sci-Fi (Sine)</option>
+            <option value="triangle">Flute (Triangle)</option>
+        </select>
     </div>
 
     <button id="startBtn">START RECEIVER</button>
-
     <canvas id="proc" style="display:none;"></canvas>
 
-        <script>
+    <script>
         const video = document.getElementById('video');
         const overlay = document.getElementById('overlay');
         const overlayCtx = overlay.getContext('2d');
@@ -88,18 +85,32 @@
         const ctx = proc.getContext('2d', { willReadFrequently: true });
         const fpsDisp = document.getElementById('fps');
         const statusDisp = document.getElementById('status');
+        const waveSelect = document.getElementById('waveSelect');
         
         let audioCtx;
         const synths = [];
         let isRunning = false;
 
-        // --- NEW FREQUENCIES (Phone Speaker Friendly) ---
-        // 440Hz (A4), 554Hz (C#5), 659Hz (E5) -> A Major Chord
-        // These are high enough for any phone speaker to play clearly.
+        // A Major Chord (Phone friendly frequencies)
         const tonalFreqs = [440, 554, 659]; 
 
         let lastTime = 0;
         let frames = 0;
+
+        // --- REAL TIME WAVEFORM CHANGER ---
+        waveSelect.addEventListener('change', (e) => {
+            const newType = e.target.value;
+            if(!audioCtx) return;
+            
+            // Only update channels 0, 1, 2 (The Tonal Oscillators)
+            // Channels 3 & 4 are Noise Buffers and don't have a 'type'
+            for(let i=0; i<3; i++) {
+                if(synths[i] && synths[i].node) {
+                    synths[i].node.type = newType;
+                }
+            }
+            statusDisp.innerText = `Mode: ${newType.toUpperCase()}`;
+        });
 
         function createNoiseBuffer(ctx) {
             const bufferSize = ctx.sampleRate * 2; 
@@ -113,31 +124,31 @@
 
         document.getElementById('startBtn').addEventListener('click', async () => {
             document.getElementById('startBtn').style.display = 'none';
-            statusDisp.innerText = "Accessing Camera...";
+            statusDisp.innerText = "Initializing...";
 
             audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             const noiseBuffer = createNoiseBuffer(audioCtx);
+
+            // Get initial wave type from dropdown
+            const startType = waveSelect.value;
 
             for(let i=0; i<5; i++) {
                 const gain = audioCtx.createGain();
                 gain.gain.value = 0;
                 gain.connect(audioCtx.destination);
-
                 let node;
 
                 if (i < 3) {
-                    // CHANNELS 0-2: Square Wave (8-Bit Sound)
-                    // Much louder and clearer on phone speakers
+                    // Tonal Channels
                     node = audioCtx.createOscillator();
-                    node.type = 'square'; 
+                    node.type = startType; 
                     node.frequency.value = tonalFreqs[i];
                     node.start();
                 } else {
-                    // CHANNELS 3-4: White Noise
+                    // Noise Channels
                     node = audioCtx.createBufferSource();
                     node.buffer = noiseBuffer;
                     node.loop = true;
-                    // Lowered playback rate for a "crunchier" static sound
                     node.playbackRate.value = i === 3 ? 0.5 : 1.0; 
                     node.start();
                 }
@@ -148,12 +159,22 @@
 
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment', width: { ideal: 1280 }, frameRate: { ideal: 60, min: 30 } }, 
+                    video: { 
+                        facingMode: 'environment', 
+                        width: { ideal: 1280 }, 
+                        frameRate: { ideal: 60, min: 30 } 
+                    }, 
                     audio: false
                 });
                 
+                // Try to lock camera settings
+                const track = stream.getVideoTracks()[0];
+                const capabilities = track.getCapabilities();
+                if (capabilities.focusMode) try { await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }); } catch(e){}
+                if (capabilities.exposureMode) try { await track.applyConstraints({ advanced: [{ exposureMode: "continuous" }] }); } catch(e){}
+
                 video.srcObject = stream;
-                statusDisp.innerText = "Align Red Boxes to Bars";
+                statusDisp.innerText = "Align Red Boxes";
                 isRunning = true;
                 requestAnimationFrame(loop);
 
@@ -168,6 +189,7 @@
 
             if(time - lastTime >= 1000) {
                 fpsDisp.innerText = `FPS: ${frames}`;
+                fpsDisp.style.color = frames < 50 ? 'red' : '#0f0';
                 frames = 0;
                 lastTime = time;
             }
@@ -208,21 +230,16 @@
                     total += imgData[p] + imgData[p+1] + imgData[p+2];
                 }
                 
-                // Normalization
                 const brightness = total / ((imgData.length/4) * 765);
 
-                // --- MIXING ADJUSTMENT ---
-                // Tonal channels (0-2) get FULL volume (2.0)
-                // Noise channels (3-4) get HALF volume (0.5) so they don't drown out the tones
+                // Mix Volumes: Tones get full volume, Noise gets half
                 const volumeMix = i < 3 ? 2.0 : 0.5;
-                
-                // Faster reaction time (0.05s) for snappy response
-                synths[i].gain.gain.setTargetAtTime(brightness * volumeMix, audioCtx.currentTime, 0.05);
+                const smoothTime = i < 3 ? 0.08 : 0.05;
+
+                synths[i].gain.gain.setTargetAtTime(brightness * volumeMix, audioCtx.currentTime, smoothTime);
             }
         }
     </script>
-
-
 </body>
 </html>
 
