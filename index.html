@@ -1,3 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Optical Vocoder Receiver</title>
+    <style>
+        body { 
+            margin: 0; 
+            background: #000; 
+            color: #0f0; 
+            font-family: 'Courier New', monospace; 
+            overflow: hidden; 
+        }
+        /* Video fills the screen */
+        video { 
+            position: absolute; 
+            top: 0; 
+            left: 0; 
+            width: 100%; 
+            height: 100%; 
+            object-fit: cover; 
+            filter: contrast(1.2) brightness(1.1); /* Slight boost to help detection */
+        }
+        
+        /* The Overlay Canvas (for red boxes) sits on top */
+        #overlay { 
+            position: absolute; 
+            top: 0; 
+            left: 0; 
+            width: 100%; 
+            height: 100%; 
+            pointer-events: none; 
+        }
+        
+        /* UI Elements */
+        #ui { 
+            position: absolute; 
+            top: 10px; 
+            left: 10px; 
+            z-index: 10; 
+            background: rgba(0,0,0,0.6); 
+            padding: 5px 10px; 
+            border: 1px solid #0f0;
+            pointer-events: none; 
+        }
+        #fps { font-weight: bold; font-size: 16px; }
+        #status { font-size: 12px; color: #aaa; margin-top: 2px; }
+
+        /* Start Button */
+        #startBtn { 
+            position: absolute; 
+            bottom: 50px; 
+            left: 50%; 
+            transform: translateX(-50%); 
+            padding: 20px 40px; 
+            font-size: 20px; 
+            font-weight: bold; 
+            background: #0f0; 
+            color: #000;
+            border: none; 
+            cursor: pointer; 
+            z-index: 20; 
+            box-shadow: 0 0 15px #0f0;
+        }
+    </style>
+</head>
+<body>
+
+    <video id="video" autoplay playsinline muted></video>
+    
+    <canvas id="overlay"></canvas>
+    
+    <div id="ui">
+        <div id="fps">FPS: 0</div>
+        <div id="status">Ready to initialize</div>
+    </div>
+
+    <button id="startBtn">START RECEIVER</button>
+
+    <canvas id="proc" style="display:none;"></canvas>
+
     <script>
         const video = document.getElementById('video');
         const overlay = document.getElementById('overlay');
@@ -5,22 +87,26 @@
         const proc = document.getElementById('proc');
         const ctx = proc.getContext('2d', { willReadFrequently: true });
         const fpsDisp = document.getElementById('fps');
+        const statusDisp = document.getElementById('status');
         
         let audioCtx;
         const synths = [];
-        // Frequencies for the Tonal parts (Bass/Mids)
-        const freqs = [55, 110, 220]; // A1, A2, A3
+        let isRunning = false;
+
+        // --- AUDIO CONFIGURATION ---
+        // Channels 0, 1, 2: Tonal Frequencies (Bass, Low Mid, High Mid)
+        // Frequencies chosen for a dark, robotic A-Minor chord
+        const tonalFreqs = [55, 110, 220]; 
 
         let lastTime = 0;
         let frames = 0;
 
-        // --- NEW: White Noise Generator Helper ---
+        // Helper: Generate White Noise Buffer for "S" and "T" sounds
         function createNoiseBuffer(ctx) {
-            const bufferSize = ctx.sampleRate * 2; // 2 seconds of noise
+            const bufferSize = ctx.sampleRate * 2; // 2 seconds buffer
             const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
             const data = buffer.getChannelData(0);
             for (let i = 0; i < bufferSize; i++) {
-                // Generate random noise between -1 and 1
                 data[i] = Math.random() * 2 - 1;
             }
             return buffer;
@@ -28,12 +114,13 @@
 
         document.getElementById('startBtn').addEventListener('click', async () => {
             document.getElementById('startBtn').style.display = 'none';
-            document.getElementById('status').innerText = "Running Vocoder...";
+            statusDisp.innerText = "Accessing Camera...";
 
+            // 1. Initialize Audio Engine
             audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             const noiseBuffer = createNoiseBuffer(audioCtx);
 
-            // Setup 5 Channels
+            // Create 5 Audio Channels
             for(let i=0; i<5; i++) {
                 const gain = audioCtx.createGain();
                 gain.gain.value = 0;
@@ -41,20 +128,19 @@
 
                 let node;
 
-                // CHANNELS 0, 1, 2: Tonal (Robot Voice)
                 if (i < 3) {
+                    // Channels 0-2: Sawtooth Wave (Buzzing Robot Voice)
                     node = audioCtx.createOscillator();
-                    node.type = 'sawtooth'; // Sawtooth is best for "Voice" simulation
-                    node.frequency.value = freqs[i];
+                    node.type = 'sawtooth'; 
+                    node.frequency.value = tonalFreqs[i];
                     node.start();
-                } 
-                // CHANNELS 3, 4: Noise (Consonants S/T/K)
-                else {
+                } else {
+                    // Channels 3-4: White Noise (Static Hiss for Consonants)
                     node = audioCtx.createBufferSource();
                     node.buffer = noiseBuffer;
                     node.loop = true;
-                    // Pitch the noise slightly differently for variety
-                    node.playbackRate.value = i === 3 ? 0.8 : 1.2; 
+                    // Pitch the noise: Ch 3 is lower static, Ch 4 is high hiss
+                    node.playbackRate.value = i === 3 ? 0.8 : 1.5; 
                     node.start();
                 }
 
@@ -62,23 +148,47 @@
                 synths.push({ node, gain });
             }
 
+            // 2. Initialize Camera
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment', width: { ideal: 1280 }, frameRate: { ideal: 60 } }, audio: false
+                    video: { 
+                        facingMode: 'environment', // Rear Camera
+                        width: { ideal: 1280 },    // HD usually forces higher bitrate
+                        frameRate: { ideal: 60, min: 30 } 
+                    }, 
+                    audio: false
                 });
+                
+                // Advanced Camera Settings (Try to lock focus/exposure if browser supports it)
+                const track = stream.getVideoTracks()[0];
+                const capabilities = track.getCapabilities();
+                const constraints = {};
+                if (capabilities.focusMode) constraints.focusMode = "continuous";
+                if (capabilities.exposureMode) constraints.exposureMode = "continuous";
+                if (Object.keys(constraints).length > 0) {
+                    try { await track.applyConstraints({ advanced: [constraints] }); } catch(e){}
+                }
+
                 video.srcObject = stream;
+                statusDisp.innerText = "Align Red Boxes to Bars";
+                isRunning = true;
                 requestAnimationFrame(loop);
+
             } catch(e) {
                 alert("Camera Error: " + e.message);
+                statusDisp.innerText = "Error: Refresh Page";
             }
         });
 
         function loop(time) {
             requestAnimationFrame(loop);
+            if (!isRunning) return;
 
-            // FPS Counter
+            // --- FPS Counter ---
             if(time - lastTime >= 1000) {
                 fpsDisp.innerText = `FPS: ${frames}`;
+                // Color code: Green = Good, Red = Bad (Audio will stutter)
+                fpsDisp.style.color = frames < 50 ? 'red' : '#0f0';
                 frames = 0;
                 lastTime = time;
             }
@@ -86,6 +196,7 @@
 
             if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
 
+            // Sync Canvas Sizes
             if (proc.width !== video.videoWidth) {
                 proc.width = video.videoWidth;
                 proc.height = video.videoHeight;
@@ -93,40 +204,55 @@
                 overlay.height = video.videoHeight;
             }
 
+            // 1. Draw Video Frame
             ctx.drawImage(video, 0, 0);
 
+            // 2. Define Zones
             const w = proc.width;
             const h = proc.height;
+            // Divide screen into 7 imaginary slots, use the middle 5 for data
             const zoneW = w / 7; 
-            const startX = zoneW; 
+            const startX = zoneW; // Start 1 slot in
             const sampleY = h / 2;
-            const sampleH = h / 4;
+            const sampleH = h / 4; // Height of the red box
 
+            // Clear Overlay
             overlayCtx.clearRect(0, 0, w, h);
             overlayCtx.strokeStyle = "red";
-            overlayCtx.lineWidth = 4;
+            overlayCtx.lineWidth = 3;
 
+            // 3. Process Each Channel
             for(let i=0; i<5; i++) {
                 const x = startX + (i * zoneW);
                 const y = sampleY - (sampleH/2);
                 
+                // Draw Guide Box
                 overlayCtx.strokeRect(x, y, zoneW*0.8, sampleH);
 
+                // Sample Pixel Data (Vertical strip in center of box)
+                // We sample a 2px wide strip to average out noise
                 const imgData = ctx.getImageData(x + (zoneW*0.4), y, 2, sampleH).data;
                 
                 let total = 0;
+                // Sum RGB values
                 for(let p=0; p<imgData.length; p+=4) {
                     total += imgData[p] + imgData[p+1] + imgData[p+2];
                 }
                 
+                // Normalize Brightness (0.0 to 1.0)
+                // Max = 255 * 3 * numPixels
                 const brightness = total / ((imgData.length/4) * 765);
 
-                // FASTER RESPONSE: Changed smoothing from 0.1 to 0.05
-                // We need the "S" sounds to snap on/off instantly
-                const smooth = i >= 3 ? 0.02 : 0.08; 
+                // --- AUDIO MAPPING ---
+                // Fast smoothing (0.02) for Noise channels (S/T sounds need to be snappy)
+                // Slower smoothing (0.08) for Tonal channels (Bass needs to sustain)
+                const smoothTime = i >= 3 ? 0.02 : 0.08; 
                 
-                synths[i].gain.gain.setTargetAtTime(brightness * 2.5, audioCtx.currentTime, smooth);
+                // Set Volume (Gain)
+                synths[i].gain.gain.setTargetAtTime(brightness * 3.0, audioCtx.currentTime, smoothTime);
             }
         }
     </script>
+</body>
+</html>
 
