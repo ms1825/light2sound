@@ -1,71 +1,149 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Light Sensor Receiver</title>
     <style>
-        body { margin: 0; background: #111; color: white; text-align: center; font-family: sans-serif; }
-        video { width: 100%; max-height: 70vh; object-fit: cover; }
-        #canvas { display: none; }
-        .guide { position: absolute; top: 25%; left: 25%; width: 50%; height: 20%; border: 2px solid cyan; pointer-events: none; }
+        body { margin: 0; background: #000; color: #0f0; font-family: 'Courier New', monospace; text-align: center; overflow: hidden; }
+        video { width: 100%; height: 60vh; object-fit: cover; background: #222; }
+        #console { position: absolute; bottom: 0; width: 100%; height: 20vh; overflow-y: scroll; font-size: 12px; text-align: left; background: rgba(0,0,0,0.8); padding: 5px; border-top: 1px solid #0f0; }
+        .guide { position: absolute; top: 30vh; left: 50%; transform: translateX(-50%); width: 100px; height: 100px; border: 3px solid #ff0000; box-shadow: 0 0 10px #ff0000; z-index: 10; }
+        button { font-size: 20px; padding: 15px 30px; margin-top: 20px; background: #0f0; border: none; font-weight: bold; cursor: pointer; }
+        #readout { font-size: 24px; font-weight: bold; margin: 10px; color: #fff; }
     </style>
 </head>
 <body>
-    <video id="video" autoplay playsinline></video>
-    <div class="guide"></div>
-    <button id="enable" style="padding: 20px; margin-top: 20px;">Initialize Sensor</button>
-    <p>Intensity: <span id="val">0</span></p>
 
-    <canvas id="canvas"></canvas>
+    <div class="guide"></div>
+    
+    <video id="video" autoplay playsinline muted></video>
+
+    <div id="readout">WAITING...</div>
+    <button id="startBtn">ACTIVATE SENSOR</button>
+
+    <div id="console">Log loaded...<br></div>
+
+    <canvas id="canvas" style="display:none;"></canvas>
 
     <script>
+        // Logger function to see errors on phone screen
+        function log(msg) {
+            const c = document.getElementById('console');
+            c.innerHTML += `> ${msg}<br>`;
+            c.scrollTop = c.scrollHeight;
+            console.log(msg);
+        }
+
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        const valDisp = document.getElementById('val');
-        
-        let audioCtx, oscillator, gainNode;
+        const startBtn = document.getElementById('startBtn');
+        const readout = document.getElementById('readout');
+        let audioCtx, osc, gainNode;
+        let isRunning = false;
 
-        document.getElementById('enable').onclick = async () => {
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            
-            // Setup a simple synth tone
-            oscillator = audioCtx.createOscillator();
-            gainNode = audioCtx.createGain();
-            oscillator.connect(gainNode);
-            gainNode.connect(audioCtx.destination);
-            oscillator.start();
-            gainNode.gain.value = 0;
+        startBtn.addEventListener('click', async () => {
+            try {
+                log("Requesting Camera Access...");
+                startBtn.style.display = 'none';
 
-            const stream = await navigator.mediaDevices.getUserMedia({ 
-                video: { facingMode: 'environment', frameRate: 60 } 
-            });
-            video.srcObject = stream;
-            process();
-        };
+                // 1. Initialize Audio (Must happen on click for iOS)
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                osc = audioCtx.createOscillator();
+                gainNode = audioCtx.createGain();
+                
+                osc.type = 'sawtooth'; // Roboty sound
+                osc.frequency.value = 0;
+                gainNode.gain.value = 0;
+                
+                osc.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                osc.start();
+                log("Audio System: ON");
 
-        function process() {
-            if (video.paused || video.ended) return;
+                // 2. Initialize Camera
+                // Note: 'environment' tries to get the back camera
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment', frameRate: { ideal: 60 } },
+                    audio: false
+                });
+                
+                video.srcObject = stream;
+                log("Camera Stream: ACTIVE");
+                
+                // Wait for video to actually play before processing
+                video.onloadedmetadata = () => {
+                    log("Video Metadata Loaded");
+                    isRunning = true;
+                    processFrame();
+                };
 
-            // Draw current frame to hidden canvas
-            canvas.width = video.videoWidth / 4; // Downsample for speed
-            canvas.height = video.videoHeight / 4;
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-            // Sample the center area (the guide box)
-            const data = ctx.getImageData(canvas.width*0.4, canvas.height*0.4, canvas.width*0.2, canvas.height*0.2).data;
-            
-            let total = 0;
-            for (let i = 0; i < data.length; i += 4) {
-                total += (data[i] + data[i+1] + data[i+2]) / 3;
+            } catch (err) {
+                log("ERROR: " + err.message);
+                log("Make sure you are using HTTPS and allowed camera access.");
+                startBtn.style.display = 'block'; // Show button again to retry
             }
-            let avgBrightness = total / (data.length / 4);
-            
-            // Map brightness to volume and pitch
-            valDisp.innerText = Math.round(avgBrightness);
-            gainNode.gain.setTargetAtTime(avgBrightness / 255, audioCtx.currentTime, 0.03);
-            oscillator.frequency.setTargetAtTime(200 + (avgBrightness * 2), audioCtx.currentTime, 0.03);
+        });
 
-            requestAnimationFrame(process);
+        function processFrame() {
+            if (!isRunning) return;
+
+            // Loop efficiently
+            requestAnimationFrame(processFrame);
+
+            if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                // Set canvas size to match video to avoid skewing
+                if (canvas.width !== video.videoWidth) {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    log(`Resolution: ${canvas.width}x${canvas.height}`);
+                }
+
+                // Draw current video frame to canvas
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                // Sample the center area (where the red box guide is)
+                // We grab a 50x50 pixel box from the absolute center
+                const centerX = Math.floor(canvas.width / 2);
+                const centerY = Math.floor(canvas.height / 2);
+                const sampleSize = 50;
+                
+                // Get pixel data
+                const frame = ctx.getImageData(centerX - (sampleSize/2), centerY - (sampleSize/2), sampleSize, sampleSize);
+                const data = frame.data;
+
+                // Calculate average brightness
+                let totalBrightness = 0;
+                let count = 0;
+                
+                // Scan every 4th pixel to save CPU
+                for (let i = 0; i < data.length; i += 16) {
+                    const r = data[i];
+                    const g = data[i+1];
+                    const b = data[i+2];
+                    totalBrightness += (r + g + b) / 3;
+                    count++;
+                }
+
+                const avg = totalBrightness / count;
+                
+                // Visual Debug
+                readout.innerText = "LIGHT LEVEL: " + Math.round(avg);
+                
+                // Audio Mapping
+                // If light is very dark (< 20), stay silent (Noise Gate)
+                if (avg < 20) {
+                    gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+                } else {
+                    // Map Brightness (0-255) to Volume (0-1)
+                    gainNode.gain.setTargetAtTime(Math.min(avg / 150, 1), audioCtx.currentTime, 0.05);
+                    
+                    // Map Brightness to Frequency (Lower pitch = easier to hear changes)
+                    // 100Hz (Low hum) to 800Hz (High beep)
+                    osc.frequency.setTargetAtTime(100 + (avg * 3), audioCtx.currentTime, 0.05);
+                }
+            }
         }
     </script>
 </body>
