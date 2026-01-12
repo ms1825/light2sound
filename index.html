@@ -3,43 +3,47 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Deep Robot Receiver</title>
+    <title>3-Channel Spatial Receiver</title>
     <style>
         body { margin: 0; background: #000; color: #fff; font-family: monospace; text-align: center; }
-        video { width: 100%; height: 60vh; object-fit: cover; filter: contrast(1.2); } /* Boost contrast for better detection */
-        .guide { position: absolute; top: 30vh; left: 50%; transform: translateX(-50%); width: 80px; height: 80px; border: 4px solid #0f0; z-index: 10; }
-        #fps { position: absolute; top: 10px; left: 10px; color: yellow; font-size: 20px; font-weight: bold; background: rgba(0,0,0,0.5); padding: 5px; }
-        #status { font-size: 14px; margin-top: 10px; color: #aaa; }
-        button { font-size: 20px; padding: 20px; width: 80%; margin-top: 10px; background: #0f0; color: black; border: none; font-weight: bold; }
+        video { width: 100%; height: 60vh; object-fit: cover; }
+        
+        /* The Alignment Guide */
+        .guide-container { 
+            position: absolute; top: 30vh; left: 50%; transform: translateX(-50%); 
+            display: flex; gap: 5px; opacity: 0.7; pointer-events: none;
+        }
+        .guide-box { width: 30px; height: 80px; border: 2px solid white; }
+        
+        #status { margin-top: 10px; color: #aaa; }
+        button { font-size: 18px; padding: 15px; margin-top: 10px; background: #0f0; border: none; }
     </style>
 </head>
 <body>
 
-    <div id="fps">FPS: 0</div>
-    <div class="guide"></div>
+    <div class="guide-container">
+        <div class="guide-box" style="border-color: red;"></div>
+        <div class="guide-box" style="border-color: green;"></div>
+        <div class="guide-box" style="border-color: cyan;"></div>
+    </div>
+    
     <video id="video" autoplay playsinline muted></video>
-
-    <div id="status">Align Green Box to Screen</div>
+    <div id="status">Align the 3 bars inside the 3 boxes</div>
     <button id="startBtn">START RECEIVER</button>
-
     <canvas id="canvas" style="display:none;"></canvas>
 
     <script>
         const startBtn = document.getElementById('startBtn');
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
-        const fpsDisplay = document.getElementById('fps');
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         
         let audioCtx;
         const synths = {
-            bass: { osc: null, gain: null, freq: 55 },  // Deep A1
-            mid:  { osc: null, gain: null, freq: 110 }, // A2
-            high: { osc: null, gain: null, freq: 165 }  // E2 (Harmonic)
+            bass: { osc: null, gain: null, freq: 65 },  
+            mid:  { osc: null, gain: null, freq: 130 }, 
+            high: { osc: null, gain: null, freq: 195 }  
         };
-
-        let lastTime = 0;
-        let frameCount = 0;
 
         startBtn.addEventListener('click', async () => {
             startBtn.style.display = 'none';
@@ -49,90 +53,67 @@
                 const s = synths[key];
                 s.osc = audioCtx.createOscillator();
                 s.gain = audioCtx.createGain();
-                
-                // Triangle wave is softer/flutey-er than Sawtooth
                 s.osc.type = 'triangle'; 
                 s.osc.frequency.value = s.freq;
                 s.gain.gain.value = 0;
-
                 s.osc.connect(s.gain);
                 s.gain.connect(audioCtx.destination);
                 s.osc.start();
             });
 
-            try {
-                // Try to force 60fps
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { 
-                        facingMode: 'environment', 
-                        width: { ideal: 640 }, // Lower res = faster processing
-                        frameRate: { ideal: 60, min: 30 } 
-                    }, 
-                    audio: false
-                });
-                
-                // Hack to lock exposure on Android (Chrome) if supported
-                const track = stream.getVideoTracks()[0];
-                const capabilities = track.getCapabilities();
-                if (capabilities.exposureMode) {
-                   try { await track.applyConstraints({ advanced: [{ exposureMode: "continuous" }] }); } catch(e){}
-                }
-
-                video.srcObject = stream;
-                processFrame();
-            } catch (e) {
-                alert("Camera Error: " + e.message);
-            }
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'environment', width: { ideal: 1280 }, frameRate: { ideal: 60 } }, audio: false
+            });
+            video.srcObject = stream;
+            processFrame();
         });
 
-        function processFrame(time) {
+        function processFrame() {
             requestAnimationFrame(processFrame);
-            
-            // FPS Counter
-            if (time - lastTime >= 1000) {
-                fpsDisplay.innerText = "FPS: " + frameCount;
-                if(frameCount < 50) fpsDisplay.style.color = "red"; // Warn if low FPS
-                else fpsDisplay.style.color = "#0f0";
-                frameCount = 0;
-                lastTime = time;
-            }
-            frameCount++;
-
             if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
 
             if (canvas.width !== video.videoWidth) {
                 canvas.width = video.videoWidth;
                 canvas.height = video.videoHeight;
             }
-
             ctx.drawImage(video, 0, 0);
 
-            // Read center pixels (smaller sample area = faster)
-            const size = 20;
-            const cx = (canvas.width / 2) - (size/2);
-            const cy = (canvas.height / 2) - (size/2);
-            const frame = ctx.getImageData(cx, cy, size, size).data;
+            // We need to sample 3 separate areas
+            const w = canvas.width;
+            const h = canvas.height;
+            const boxW = 20; // Sample size
+            
+            // Calculate center points for Left, Middle, Right (Assuming guide is centered)
+            // You might need to adjust 'offset' depending on how far apart your PC bars are physically
+            // Relative to the camera view, we assume they are clustered in the center
+            const spacing = w * 0.08; // Distance between sample points (Adjust this if bars are too far/close)
+            
+            const leftX  = (w/2) - spacing;
+            const midX   = (w/2);
+            const rightX = (w/2) + spacing;
+            const sampleY = h/2;
 
-            let rTotal = 0, gTotal = 0, bTotal = 0, count = 0;
-
-            // Skip pixels to run faster (Sample every 8th pixel)
-            for (let i = 0; i < frame.length; i += 32) {
-                rTotal += frame[i];
-                gTotal += frame[i+1];
-                bTotal += frame[i+2];
-                count++;
+            function getBrightness(x, y) {
+                const img = ctx.getImageData(x - 10, y - 40, 20, 80).data; // Sample a vertical strip
+                let sum = 0;
+                // Sample only the Green channel for simplicity (since it carries brightness well for all colors in YUV)
+                // OR sample RGB specific channels for maximum precision
+                for(let i=0; i<img.length; i+=4) {
+                    sum += img[i] + img[i+1] + img[i+2];
+                }
+                return (sum / (img.length/4)) / (255*3);
             }
 
-            const r = (rTotal / count) / 255;
-            const g = (gTotal / count) / 255;
-            const b = (bTotal / count) / 255;
+            // Get brightness of the 3 zones
+            const bVal = getBrightness(leftX, sampleY);
+            const mVal = getBrightness(midX, sampleY);
+            const hVal = getBrightness(rightX, sampleY);
 
-            // Audio Mixing with "Slew" (Smoothing)
-            // The '0.1' is the time constant. Increase to 0.2 for smoother (but laggier) sound.
+            // Audio Mapping
             const now = audioCtx.currentTime;
-            synths.bass.gain.gain.setTargetAtTime(r * 2.0, now, 0.1); 
-            synths.mid.gain.gain.setTargetAtTime(g * 1.5, now, 0.1);
-            synths.high.gain.gain.setTargetAtTime(b * 1.0, now, 0.1);
+            synths.bass.gain.gain.setTargetAtTime(bVal * 2, now, 0.05); 
+            synths.mid.gain.gain.setTargetAtTime(mVal * 1.5, now, 0.05);
+            synths.high.gain.gain.setTargetAtTime(hVal * 1.0, now, 0.05);
         }
     </script>
 </body>
