@@ -80,7 +80,7 @@
 
     <canvas id="proc" style="display:none;"></canvas>
 
-    <script>
+        <script>
         const video = document.getElementById('video');
         const overlay = document.getElementById('overlay');
         const overlayCtx = overlay.getContext('2d');
@@ -93,17 +93,16 @@
         const synths = [];
         let isRunning = false;
 
-        // --- AUDIO CONFIGURATION ---
-        // Channels 0, 1, 2: Tonal Frequencies (Bass, Low Mid, High Mid)
-        // Frequencies chosen for a dark, robotic A-Minor chord
-        const tonalFreqs = [55, 110, 220]; 
+        // --- NEW FREQUENCIES (Phone Speaker Friendly) ---
+        // 440Hz (A4), 554Hz (C#5), 659Hz (E5) -> A Major Chord
+        // These are high enough for any phone speaker to play clearly.
+        const tonalFreqs = [440, 554, 659]; 
 
         let lastTime = 0;
         let frames = 0;
 
-        // Helper: Generate White Noise Buffer for "S" and "T" sounds
         function createNoiseBuffer(ctx) {
-            const bufferSize = ctx.sampleRate * 2; // 2 seconds buffer
+            const bufferSize = ctx.sampleRate * 2; 
             const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
             const data = buffer.getChannelData(0);
             for (let i = 0; i < bufferSize; i++) {
@@ -116,11 +115,9 @@
             document.getElementById('startBtn').style.display = 'none';
             statusDisp.innerText = "Accessing Camera...";
 
-            // 1. Initialize Audio Engine
             audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             const noiseBuffer = createNoiseBuffer(audioCtx);
 
-            // Create 5 Audio Channels
             for(let i=0; i<5; i++) {
                 const gain = audioCtx.createGain();
                 gain.gain.value = 0;
@@ -129,18 +126,19 @@
                 let node;
 
                 if (i < 3) {
-                    // Channels 0-2: Sawtooth Wave (Buzzing Robot Voice)
+                    // CHANNELS 0-2: Square Wave (8-Bit Sound)
+                    // Much louder and clearer on phone speakers
                     node = audioCtx.createOscillator();
-                    node.type = 'sawtooth'; 
+                    node.type = 'square'; 
                     node.frequency.value = tonalFreqs[i];
                     node.start();
                 } else {
-                    // Channels 3-4: White Noise (Static Hiss for Consonants)
+                    // CHANNELS 3-4: White Noise
                     node = audioCtx.createBufferSource();
                     node.buffer = noiseBuffer;
                     node.loop = true;
-                    // Pitch the noise: Ch 3 is lower static, Ch 4 is high hiss
-                    node.playbackRate.value = i === 3 ? 0.8 : 1.5; 
+                    // Lowered playback rate for a "crunchier" static sound
+                    node.playbackRate.value = i === 3 ? 0.5 : 1.0; 
                     node.start();
                 }
 
@@ -148,27 +146,12 @@
                 synths.push({ node, gain });
             }
 
-            // 2. Initialize Camera
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { 
-                        facingMode: 'environment', // Rear Camera
-                        width: { ideal: 1280 },    // HD usually forces higher bitrate
-                        frameRate: { ideal: 60, min: 30 } 
-                    }, 
+                    video: { facingMode: 'environment', width: { ideal: 1280 }, frameRate: { ideal: 60, min: 30 } }, 
                     audio: false
                 });
                 
-                // Advanced Camera Settings (Try to lock focus/exposure if browser supports it)
-                const track = stream.getVideoTracks()[0];
-                const capabilities = track.getCapabilities();
-                const constraints = {};
-                if (capabilities.focusMode) constraints.focusMode = "continuous";
-                if (capabilities.exposureMode) constraints.exposureMode = "continuous";
-                if (Object.keys(constraints).length > 0) {
-                    try { await track.applyConstraints({ advanced: [constraints] }); } catch(e){}
-                }
-
                 video.srcObject = stream;
                 statusDisp.innerText = "Align Red Boxes to Bars";
                 isRunning = true;
@@ -176,7 +159,6 @@
 
             } catch(e) {
                 alert("Camera Error: " + e.message);
-                statusDisp.innerText = "Error: Refresh Page";
             }
         });
 
@@ -184,11 +166,8 @@
             requestAnimationFrame(loop);
             if (!isRunning) return;
 
-            // --- FPS Counter ---
             if(time - lastTime >= 1000) {
                 fpsDisp.innerText = `FPS: ${frames}`;
-                // Color code: Green = Good, Red = Bad (Audio will stutter)
-                fpsDisp.style.color = frames < 50 ? 'red' : '#0f0';
                 frames = 0;
                 lastTime = time;
             }
@@ -196,7 +175,6 @@
 
             if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
 
-            // Sync Canvas Sizes
             if (proc.width !== video.videoWidth) {
                 proc.width = video.videoWidth;
                 proc.height = video.videoHeight;
@@ -204,55 +182,47 @@
                 overlay.height = video.videoHeight;
             }
 
-            // 1. Draw Video Frame
             ctx.drawImage(video, 0, 0);
 
-            // 2. Define Zones
             const w = proc.width;
             const h = proc.height;
-            // Divide screen into 7 imaginary slots, use the middle 5 for data
             const zoneW = w / 7; 
-            const startX = zoneW; // Start 1 slot in
+            const startX = zoneW; 
             const sampleY = h / 2;
-            const sampleH = h / 4; // Height of the red box
+            const sampleH = h / 4; 
 
-            // Clear Overlay
             overlayCtx.clearRect(0, 0, w, h);
             overlayCtx.strokeStyle = "red";
             overlayCtx.lineWidth = 3;
 
-            // 3. Process Each Channel
             for(let i=0; i<5; i++) {
                 const x = startX + (i * zoneW);
                 const y = sampleY - (sampleH/2);
                 
-                // Draw Guide Box
                 overlayCtx.strokeRect(x, y, zoneW*0.8, sampleH);
 
-                // Sample Pixel Data (Vertical strip in center of box)
-                // We sample a 2px wide strip to average out noise
                 const imgData = ctx.getImageData(x + (zoneW*0.4), y, 2, sampleH).data;
                 
                 let total = 0;
-                // Sum RGB values
                 for(let p=0; p<imgData.length; p+=4) {
                     total += imgData[p] + imgData[p+1] + imgData[p+2];
                 }
                 
-                // Normalize Brightness (0.0 to 1.0)
-                // Max = 255 * 3 * numPixels
+                // Normalization
                 const brightness = total / ((imgData.length/4) * 765);
 
-                // --- AUDIO MAPPING ---
-                // Fast smoothing (0.02) for Noise channels (S/T sounds need to be snappy)
-                // Slower smoothing (0.08) for Tonal channels (Bass needs to sustain)
-                const smoothTime = i >= 3 ? 0.02 : 0.08; 
+                // --- MIXING ADJUSTMENT ---
+                // Tonal channels (0-2) get FULL volume (2.0)
+                // Noise channels (3-4) get HALF volume (0.5) so they don't drown out the tones
+                const volumeMix = i < 3 ? 2.0 : 0.5;
                 
-                // Set Volume (Gain)
-                synths[i].gain.gain.setTargetAtTime(brightness * 3.0, audioCtx.currentTime, smoothTime);
+                // Faster reaction time (0.05s) for snappy response
+                synths[i].gain.gain.setTargetAtTime(brightness * volumeMix, audioCtx.currentTime, 0.05);
             }
         }
     </script>
+
+
 </body>
 </html>
 
