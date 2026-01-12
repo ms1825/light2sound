@@ -1,242 +1,128 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Optical Vocoder Receiver v2</title>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { 
-            margin: 0; 
-            background: #000; 
-            color: #0f0; 
-            font-family: 'Courier New', monospace; 
-            overflow: hidden; 
-        }
-        video { 
-            position: absolute; 
-            top: 0; left: 0; width: 100%; height: 100%; 
-            object-fit: cover; 
-            filter: contrast(1.2) brightness(1.1); 
-        }
-        #overlay { 
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
-            pointer-events: none; 
-        }
-        
-        /* UI Panel */
-        #ui { 
-            position: absolute; 
-            top: 10px; left: 10px; 
-            z-index: 10; 
-            background: rgba(0,0,0,0.7); 
-            padding: 10px; 
-            border: 1px solid #0f0;
-            border-radius: 5px;
-        }
-        
-        #fps { font-weight: bold; font-size: 14px; margin-bottom: 5px; }
-        #status { font-size: 11px; color: #aaa; margin-bottom: 10px; }
-
-        /* The New Dropdown Selector */
-        select {
-            background: #222;
-            color: #fff;
-            border: 1px solid #0f0;
-            padding: 5px;
-            font-family: monospace;
-            font-size: 14px;
-            width: 100%;
-        }
-
-        #startBtn { 
-            position: absolute; bottom: 50px; left: 50%; transform: translateX(-50%); 
-            padding: 20px 40px; font-size: 20px; font-weight: bold; 
-            background: #0f0; color: #000; border: none; cursor: pointer; 
-            z-index: 20; box-shadow: 0 0 15px #0f0; border-radius: 5px;
-        }
+        body { margin: 0; background: #111; color: #fff; font-family: monospace; text-align: center; }
+        canvas { width: 100%; height: 50vh; background: #000; }
+        #stats { padding: 10px; text-align: left; background: #222; margin: 10px; border-radius: 5px; font-size: 14px; }
+        .stat-row { display: flex; justify-content: space-between; border-bottom: 1px solid #444; padding: 5px 0; }
+        .val { color: #0f0; font-weight: bold; }
+        .err { color: #f00; font-weight: bold; }
+        #log { height: 100px; overflow-y: scroll; font-size: 10px; text-align: left; padding: 10px; border-top: 1px solid #444; color: #aaa; }
     </style>
 </head>
 <body>
-
-    <video id="video" autoplay playsinline muted></video>
-    <canvas id="overlay"></canvas>
+    <canvas id="canvas"></canvas>
     
-    <div id="ui">
-        <div id="fps">FPS: 0</div>
-        <div id="status">Ready...</div>
-        
-        <label style="font-size:12px;">VOICE TYPE:</label><br>
-        <select id="waveSelect">
-            <option value="square">Harmonica (Square)</option>
-            <option value="sawtooth">Robot Voice (Saw)</option>
-            <option value="sine">Sci-Fi (Sine)</option>
-            <option value="triangle">Flute (Triangle)</option>
-        </select>
+    <div id="stats">
+        <div class="stat-row"><span>Status:</span> <span id="status">Waiting...</span></div>
+        <div class="stat-row"><span>Packet ID:</span> <span id="lastId" class="val">0</span></div>
+        <div class="stat-row"><span>Throughput:</span> <span id="throughput" class="val">0 B/s</span></div>
+        <div class="stat-row"><span>Success Rate:</span> <span id="successRate" class="val">100%</span></div>
+        <div class="stat-row"><span>Dropped:</span> <span id="dropped" class="err">0</span></div>
     </div>
-
-    <button id="startBtn">START RECEIVER</button>
-    <canvas id="proc" style="display:none;"></canvas>
+    
+    <div id="log">Log started...<br></div>
 
     <script>
-        const video = document.getElementById('video');
-        const overlay = document.getElementById('overlay');
-        const overlayCtx = overlay.getContext('2d');
-        const proc = document.getElementById('proc');
-        const ctx = proc.getContext('2d', { willReadFrequently: true });
-        const fpsDisp = document.getElementById('fps');
-        const statusDisp = document.getElementById('status');
-        const waveSelect = document.getElementById('waveSelect');
+        const canvas = document.getElementById("canvas");
+        const ctx = canvas.getContext("2d");
+        const logDiv = document.getElementById("log");
         
-        let audioCtx;
-        const synths = [];
-        let isRunning = false;
-
-        // A Major Chord (Phone friendly frequencies)
-        const tonalFreqs = [440, 554, 659]; 
-
+        // Metrics
+        let lastPacketId = -1;
+        let totalBytes = 0;
+        let droppedPackets = 0;
+        let receivedPackets = 0;
+        let startTime = 0;
         let lastTime = 0;
-        let frames = 0;
 
-        // --- REAL TIME WAVEFORM CHANGER ---
-        waveSelect.addEventListener('change', (e) => {
-            const newType = e.target.value;
-            if(!audioCtx) return;
-            
-            // Only update channels 0, 1, 2 (The Tonal Oscillators)
-            // Channels 3 & 4 are Noise Buffers and don't have a 'type'
-            for(let i=0; i<3; i++) {
-                if(synths[i] && synths[i].node) {
-                    synths[i].node.type = newType;
-                }
-            }
-            statusDisp.innerText = `Mode: ${newType.toUpperCase()}`;
-        });
-
-        function createNoiseBuffer(ctx) {
-            const bufferSize = ctx.sampleRate * 2; 
-            const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-            const data = buffer.getChannelData(0);
-            for (let i = 0; i < bufferSize; i++) {
-                data[i] = Math.random() * 2 - 1;
-            }
-            return buffer;
+        function log(msg) {
+            logDiv.innerHTML = `> ${msg}<br>` + logDiv.innerHTML;
         }
 
-        document.getElementById('startBtn').addEventListener('click', async () => {
-            document.getElementById('startBtn').style.display = 'none';
-            statusDisp.innerText = "Initializing...";
+        // Camera Setup
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then(function(stream) {
+            const video = document.createElement("video");
+            video.srcObject = stream;
+            video.setAttribute("playsinline", true); // required to tell iOS safari we don't want fullscreen
+            video.play();
+            requestAnimationFrame(tick);
 
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            const noiseBuffer = createNoiseBuffer(audioCtx);
+            function tick() {
+                if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                    canvas.height = video.videoHeight;
+                    canvas.width = video.videoWidth;
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    
+                    // Scan for QR
+                    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
 
-            // Get initial wave type from dropdown
-            const startType = waveSelect.value;
-
-            for(let i=0; i<5; i++) {
-                const gain = audioCtx.createGain();
-                gain.gain.value = 0;
-                gain.connect(audioCtx.destination);
-                let node;
-
-                if (i < 3) {
-                    // Tonal Channels
-                    node = audioCtx.createOscillator();
-                    node.type = startType; 
-                    node.frequency.value = tonalFreqs[i];
-                    node.start();
-                } else {
-                    // Noise Channels
-                    node = audioCtx.createBufferSource();
-                    node.buffer = noiseBuffer;
-                    node.loop = true;
-                    node.playbackRate.value = i === 3 ? 0.5 : 1.0; 
-                    node.start();
+                    if (code) {
+                        handleData(code.data);
+                        // Draw box around QR
+                        ctx.lineWidth = 4;
+                        ctx.strokeStyle = "#00FF00";
+                        ctx.strokeRect(code.location.topLeftCorner.x, code.location.topLeftCorner.y, 
+                                     code.location.bottomRightCorner.x - code.location.topLeftCorner.x,
+                                     code.location.bottomRightCorner.y - code.location.topLeftCorner.y);
+                    }
                 }
-
-                node.connect(gain);
-                synths.push({ node, gain });
-            }
-
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { 
-                        facingMode: 'environment', 
-                        width: { ideal: 1280 }, 
-                        frameRate: { ideal: 60, min: 30 } 
-                    }, 
-                    audio: false
-                });
-                
-                // Try to lock camera settings
-                const track = stream.getVideoTracks()[0];
-                const capabilities = track.getCapabilities();
-                if (capabilities.focusMode) try { await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }); } catch(e){}
-                if (capabilities.exposureMode) try { await track.applyConstraints({ advanced: [{ exposureMode: "continuous" }] }); } catch(e){}
-
-                video.srcObject = stream;
-                statusDisp.innerText = "Align Red Boxes";
-                isRunning = true;
-                requestAnimationFrame(loop);
-
-            } catch(e) {
-                alert("Camera Error: " + e.message);
+                requestAnimationFrame(tick);
             }
         });
 
-        function loop(time) {
-            requestAnimationFrame(loop);
-            if (!isRunning) return;
+        function handleData(jsonStr) {
+            try {
+                const data = JSON.parse(jsonStr);
+                const currentId = data.id;
 
-            if(time - lastTime >= 1000) {
-                fpsDisp.innerText = `FPS: ${frames}`;
-                fpsDisp.style.color = frames < 50 ? 'red' : '#0f0';
-                frames = 0;
-                lastTime = time;
-            }
-            frames++;
+                // Ignore duplicate reads of the same frame
+                if (currentId === lastPacketId) return;
 
-            if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
+                // Start timer on first packet
+                const now = Date.now();
+                if (startTime === 0) startTime = now;
 
-            if (proc.width !== video.videoWidth) {
-                proc.width = video.videoWidth;
-                proc.height = video.videoHeight;
-                overlay.width = video.videoWidth;
-                overlay.height = video.videoHeight;
-            }
-
-            ctx.drawImage(video, 0, 0);
-
-            const w = proc.width;
-            const h = proc.height;
-            const zoneW = w / 7; 
-            const startX = zoneW; 
-            const sampleY = h / 2;
-            const sampleH = h / 4; 
-
-            overlayCtx.clearRect(0, 0, w, h);
-            overlayCtx.strokeStyle = "red";
-            overlayCtx.lineWidth = 3;
-
-            for(let i=0; i<5; i++) {
-                const x = startX + (i * zoneW);
-                const y = sampleY - (sampleH/2);
-                
-                overlayCtx.strokeRect(x, y, zoneW*0.8, sampleH);
-
-                const imgData = ctx.getImageData(x + (zoneW*0.4), y, 2, sampleH).data;
-                
-                let total = 0;
-                for(let p=0; p<imgData.length; p+=4) {
-                    total += imgData[p] + imgData[p+1] + imgData[p+2];
+                // Check for dropped packets
+                if (lastPacketId !== -1) {
+                    const diff = currentId - lastPacketId;
+                    if (diff > 1) {
+                        const lost = diff - 1;
+                        droppedPackets += lost;
+                        log(`MISSED ${lost} packets (ID ${lastPacketId+1} to ${currentId-1})`);
+                    }
                 }
+
+                // Update Stats
+                lastPacketId = currentId;
+                receivedPackets++;
+                totalBytes += jsonStr.length; // Approximate raw throughput
+
+                // Calculate B/s (Moving average window could be better, but this is simple)
+                const elapsedSeconds = (now - startTime) / 1000;
+                const bps = Math.round(totalBytes / elapsedSeconds);
+                const kbps = (bps / 1024).toFixed(2);
                 
-                const brightness = total / ((imgData.length/4) * 765);
+                // Calculate Success Rate
+                const totalSent = (receivedPackets + droppedPackets);
+                const rate = Math.round((receivedPackets / totalSent) * 100);
 
-                // Mix Volumes: Tones get full volume, Noise gets half
-                const volumeMix = i < 3 ? 2.0 : 0.5;
-                const smoothTime = i < 3 ? 0.08 : 0.05;
+                // Update UI
+                document.getElementById("status").innerText = "Receiving...";
+                document.getElementById("lastId").innerText = currentId;
+                document.getElementById("throughput").innerText = `${bps} B/s (${kbps} KB/s)`;
+                document.getElementById("successRate").innerText = `${rate}%`;
+                document.getElementById("dropped").innerText = droppedPackets;
+                
+                // Reset color if receiving
+                document.getElementById("status").style.color = "#0f0";
 
-                synths[i].gain.gain.setTargetAtTime(brightness * volumeMix, audioCtx.currentTime, smoothTime);
+            } catch (e) {
+                // Not our JSON
             }
         }
     </script>
