@@ -5,9 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body { background: #000; color: #0f0; font-family: monospace; text-align: center; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+        
         #cam-container { flex-grow: 1; position: relative; overflow: hidden; }
+        /* CSS scales the video to look full screen, but internal resolution is low for speed */
         canvas { width: 100%; height: 100%; object-fit: cover; }
         
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; p-2; text-align: left; pointer-events: none; }
+        #fps { background: rgba(0,0,0,0.7); color: #0f0; padding: 5px; font-weight: bold; display: inline-block; margin: 5px; border: 1px solid #0f0; }
+
         #controls { background: #222; padding: 15px; border-top: 1px solid #444; }
         select { width: 100%; padding: 10px; background: #333; color: white; border: 1px solid #0f0; font-size: 16px; margin-bottom: 10px; }
         button { width: 100%; padding: 15px; background: #0f0; color: #000; font-weight: bold; border: none; font-size: 18px; }
@@ -20,6 +25,9 @@
 
     <div id="cam-container">
         <canvas id="canvas"></canvas>
+        <div id="ui-layer">
+            <div id="fps">FPS: 0</div>
+        </div>
     </div>
 
     <div id="controls">
@@ -34,12 +42,13 @@
 
     <script>
         const canvas = document.getElementById("canvas");
-        const ctx = canvas.getContext("2d");
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
         const status = document.getElementById("status");
         const debugBar = document.getElementById("debug-bar");
         const camSelect = document.getElementById("camSelect");
+        const fpsDisp = document.getElementById("fps");
         
-        // ADPCM Tables
+        // ADPCM Config
         let decoderIndex = 0; let decoderPred = 0;
         const stepTable = [7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,599,659,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767];
         const indexTable = [-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8];
@@ -48,40 +57,34 @@
         let nextTime = 0;
         let lastId = -1;
         let currentStream = null;
+        
+        // FPS Logic
+        let lastTime = 0;
+        let frameCount = 0;
 
         document.getElementById('btn').onclick = async () => {
             document.getElementById('btn').style.display = 'none';
-            
-            // 1. Init Audio Engine
             audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
             if (audioCtx.state === 'suspended') await audioCtx.resume();
 
-            // 2. Start Camera (This triggers permission prompt)
             await startCamera(); 
-
-            // 3. NOW list the devices (Permission granted)
             populateCameraList();
         };
 
-        // Populate Camera List
         async function populateCameraList() {
             const devices = await navigator.mediaDevices.enumerateDevices();
             const videoDevices = devices.filter(device => device.kind === 'videoinput');
-            
-            // Only update if we found new ones
             if(videoDevices.length > 0) {
                 camSelect.innerHTML = '';
                 videoDevices.forEach((device, index) => {
                     const option = document.createElement('option');
                     option.value = device.deviceId;
-                    // iOS often gives empty labels until permission is active
-                    option.text = device.label || `Camera ${index + 1} (${device.kind})`;
+                    option.text = device.label || `Camera ${index + 1}`;
                     camSelect.appendChild(option);
                 });
             }
         }
 
-        // Camera Switcher
         camSelect.onchange = () => {
             if(currentStream) {
                 currentStream.getTracks().forEach(track => track.stop());
@@ -94,8 +97,10 @@
                 video: { 
                     deviceId: deviceId ? { exact: deviceId } : undefined,
                     facingMode: deviceId ? undefined : "environment",
-                    width: { ideal: 1280 },
-                    height: { ideal: 720 },
+                    // OPTIMIZATION: Request lower resolution (VGA)
+                    // This makes scanning 3x faster than HD
+                    width: { ideal: 640 }, 
+                    height: { ideal: 480 },
                     focusMode: "continuous"
                 } 
             };
@@ -103,7 +108,6 @@
             try {
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 currentStream = stream;
-                
                 const video = document.createElement("video");
                 video.srcObject = stream;
                 video.setAttribute("playsinline", true);
@@ -139,7 +143,6 @@
         }
 
         function playChunk(float32Data) {
-            // Visual Debug: Flash the bar to prove data arrived
             debugBar.style.width = "100%";
             setTimeout(() => { debugBar.style.width = "0%"; }, 100);
 
@@ -150,55 +153,71 @@
             source.connect(audioCtx.destination);
             
             const now = audioCtx.currentTime;
-            // Increased Buffer to 0.15s to prevent silence gaps
             if (nextTime < now) nextTime = now + 0.15; 
             source.start(nextTime);
             nextTime += buffer.duration;
             
-            status.innerText = `Receiving... (Time: ${Math.round(now)})`;
+            status.innerText = `Receiving... (T: ${Math.round(now)})`;
             status.style.color = "#0f0";
         }
 
         function tick(video) {
+            requestAnimationFrame(() => tick(video));
+
+            // FPS Counter
+            const now = performance.now();
+            frameCount++;
+            if (now - lastTime >= 1000) {
+                fpsDisp.innerText = `FPS: ${frameCount}`;
+                // Warn if FPS is too low for the audio stream (assuming 15fps transmitter)
+                fpsDisp.style.color = frameCount < 15 ? "red" : "#0f0";
+                frameCount = 0;
+                lastTime = now;
+            }
+
             if (video.readyState === video.HAVE_ENOUGH_DATA) {
-                canvas.height = video.videoHeight;
-                canvas.width = video.videoWidth;
+                // Resize Canvas to match video (but keep it low res)
+                if (canvas.width !== video.videoWidth) {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                }
+
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                
+                // Get Image Data
                 const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                
+                // Scan QR
                 const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
 
                 if (code) {
-                    // Protocol: ID-Part|Base64
                     const parts = code.data.split('|');
                     if (parts.length === 2) {
-                        const header = parts[0];
-                        const b64 = parts[1];
-                        const id = parseInt(header.split('-')[0]);
-                        
-                        // Only play NEW packets
+                        const id = parseInt(parts[0].split('-')[0]);
                         if (id > lastId) {
                             try {
-                                const bin = atob(b64);
+                                const bin = atob(parts[1]);
                                 const bytes = new Uint8Array(bin.length);
                                 for(let i=0; i<bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                                const pcm = decodeADPCM(bytes);
-                                playChunk(pcm);
+                                playChunk(decodeADPCM(bytes));
                                 lastId = id;
-                            } catch(e) {
-                                // Corruption happens, ignore frame
-                            }
+                            } catch(e) {}
                         }
                     }
                     
-                    // Green Box Overlay
+                    // Draw Outline
                     ctx.strokeStyle = "#0f0";
                     ctx.lineWidth = 4;
-                    ctx.strokeRect(code.location.topLeftCorner.x, code.location.topLeftCorner.y, 
-                                 code.location.bottomRightCorner.x - code.location.topLeftCorner.x,
-                                 code.location.bottomRightCorner.y - code.location.topLeftCorner.y);
+                    const loc = code.location;
+                    ctx.beginPath();
+                    ctx.moveTo(loc.topLeftCorner.x, loc.topLeftCorner.y);
+                    ctx.lineTo(loc.topRightCorner.x, loc.topRightCorner.y);
+                    ctx.lineTo(loc.bottomRightCorner.x, loc.bottomRightCorner.y);
+                    ctx.lineTo(loc.bottomLeftCorner.x, loc.bottomLeftCorner.y);
+                    ctx.closePath();
+                    ctx.stroke();
                 }
             }
-            requestAnimationFrame(() => tick(video));
         }
     </script>
 </body>
