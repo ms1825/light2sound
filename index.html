@@ -4,25 +4,40 @@
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { background: #000; color: #0f0; font-family: monospace; text-align: center; margin: 0; }
-        canvas { width: 100%; height: 50vh; background: #222; }
-        #status { font-size: 14px; padding: 10px; color: #fff; border-top: 1px solid #333; }
-        button { padding: 15px; background: #0f0; color: #000; border: none; font-weight: bold; width: 100%; font-size: 18px; }
+        body { background: #000; color: #0f0; font-family: monospace; text-align: center; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+        
+        /* Camera Area */
+        #cam-container { flex-grow: 1; position: relative; overflow: hidden; }
+        canvas { width: 100%; height: 100%; object-fit: cover; }
+        
+        /* Controls */
+        #controls { background: #222; padding: 15px; border-top: 1px solid #444; }
+        select { width: 100%; padding: 10px; background: #333; color: white; border: 1px solid #0f0; font-size: 16px; margin-bottom: 10px; }
+        button { width: 100%; padding: 15px; background: #0f0; color: #000; font-weight: bold; border: none; font-size: 18px; }
+        #status { margin-top: 10px; color: #aaa; font-size: 12px; }
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
-    <div id="status">Waiting...</div>
-    <button id="btn">TAP TO START AUDIO</button>
+
+    <div id="cam-container">
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <div id="controls">
+        <label style="display:block; text-align: left; margin-bottom: 5px; color: #fff;">Select Camera:</label>
+        <select id="camSelect"><option>Loading Cameras...</option></select>
+        <button id="btn">START LISTENING</button>
+        <div id="status">Ready</div>
+    </div>
 
     <script>
         const canvas = document.getElementById("canvas");
         const ctx = canvas.getContext("2d");
         const status = document.getElementById("status");
+        const camSelect = document.getElementById("camSelect");
         
-        // ADPCM Decoder State
-        let decoderIndex = 0;
-        let decoderPred = 0;
+        // Audio Logic (ADPCM Decoder)
+        let decoderIndex = 0; let decoderPred = 0;
         const stepTable = [7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,599,659,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767];
         const indexTable = [-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8];
 
@@ -30,20 +45,63 @@
         let nextTime = 0;
         let lastId = -1;
         let partBuffer = {};
+        let currentStream = null;
 
+        // Populate Camera List
+        async function getCameras() {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoDevices = devices.filter(device => device.kind === 'videoinput');
+            camSelect.innerHTML = '';
+            videoDevices.forEach(device => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                option.text = device.label || `Camera ${camSelect.length + 1}`;
+                camSelect.appendChild(option);
+            });
+        }
+        getCameras();
+
+        // Start Button
         document.getElementById('btn').onclick = () => {
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
+            if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
+            startCamera(camSelect.value);
             document.getElementById('btn').style.display = 'none';
-            startCamera();
         };
+
+        // Camera Switcher
+        camSelect.onchange = () => {
+            if(currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+                startCamera(camSelect.value);
+            }
+        };
+
+        function startCamera(deviceId) {
+            const constraints = { 
+                video: { 
+                    deviceId: deviceId ? { exact: deviceId } : undefined,
+                    facingMode: deviceId ? undefined : "environment",
+                    width: { ideal: 1280 }, // HD for better QR read
+                    focusMode: "continuous"
+                } 
+            };
+            
+            navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
+                currentStream = stream;
+                const video = document.createElement("video");
+                video.srcObject = stream;
+                video.setAttribute("playsinline", true);
+                video.play();
+                requestAnimationFrame(() => tick(video));
+                status.innerText = "Camera Active. Scanning...";
+            }).catch(e => alert("Camera Error: " + e.message));
+        }
 
         function decodeADPCM(bytes) {
             const samples = [];
             for(let i=0; i<bytes.length; i++) {
                 const byte = bytes[i];
-                // Process High Nibble
                 processNibble((byte >> 4) & 0xF, samples);
-                // Process Low Nibble
                 processNibble(byte & 0xF, samples);
             }
             return new Float32Array(samples);
@@ -55,41 +113,27 @@
             if (code & 4) diffq += step;
             if (code & 2) diffq += (step >> 1);
             if (code & 1) diffq += (step >> 2);
-            
             if (code & 8) decoderPred -= diffq; else decoderPred += diffq;
             decoderPred = Math.max(-32768, Math.min(32767, decoderPred));
             decoderIndex += indexTable[code];
             decoderIndex = Math.max(0, Math.min(88, decoderIndex));
-            
-            output.push(decoderPred / 32767); // Convert back to Float -1.0 to 1.0
+            output.push(decoderPred / 32767);
         }
 
         function playChunk(float32Data) {
             const buffer = audioCtx.createBuffer(1, float32Data.length, 8000);
             buffer.copyToChannel(float32Data, 0);
-            
             const source = audioCtx.createBufferSource();
             source.buffer = buffer;
             source.connect(audioCtx.destination);
             
-            // Scheduling logic to keep audio smooth
             const now = audioCtx.currentTime;
-            if (nextTime < now) nextTime = now + 0.05;
-            
+            // Buffer Tweak: Increased to 0.1s to reduce crackle
+            if (nextTime < now) nextTime = now + 0.1; 
             source.start(nextTime);
             nextTime += buffer.duration;
-            status.innerText = "Playing Audio Stream...";
+            status.innerText = "Receiving Audio Stream...";
             status.style.color = "#0f0";
-        }
-
-        function startCamera() {
-            navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then((stream) => {
-                const video = document.createElement("video");
-                video.srcObject = stream;
-                video.setAttribute("playsinline", true);
-                video.play();
-                requestAnimationFrame(() => tick(video));
-            });
         }
 
         function tick(video) {
@@ -101,7 +145,6 @@
                 const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
 
                 if (code) {
-                    // Protocol: ID-Part|Base64
                     const [header, b64] = code.data.split('|');
                     const [idStr, partStr] = header.split('-');
                     const id = parseInt(idStr);
@@ -110,25 +153,20 @@
                         if (!partBuffer[id]) partBuffer[id] = {};
                         partBuffer[id][partStr] = b64;
                         
-                        // If we have both parts (1 and 2), play it
-                        if (partBuffer[id]['1'] && partBuffer[id]['2']) {
-                            const fullB64 = partBuffer[id]['1'] + partBuffer[id]['2'];
-                            
-                            // Base64 -> Bytes
-                            const bin = atob(fullB64);
+                        // Assuming 1 part per QR for now (simplified for speed)
+                        // If you use large payloads on PC, this might need logic update
+                        // But standard is single-part
+                        if (partBuffer[id]['1']) { 
+                            const bin = atob(partBuffer[id]['1']);
                             const bytes = new Uint8Array(bin.length);
                             for(let i=0; i<bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                            
-                            // Bytes -> Audio
                             const pcm = decodeADPCM(bytes);
                             playChunk(pcm);
-                            
-                            lastId = id; // Mark complete
-                            delete partBuffer[id]; // Cleanup
+                            lastId = id; 
+                            delete partBuffer[id];
                         }
                     }
                     
-                    // Box
                     ctx.strokeStyle = "#0f0";
                     ctx.lineWidth = 4;
                     ctx.strokeRect(code.location.topLeftCorner.x, code.location.topLeftCorner.y, 
