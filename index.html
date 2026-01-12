@@ -1,132 +1,241 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { background: #000; color: #0f0; font-family: monospace; text-align: center; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+        body { background: #000; color: #0f0; font-family: monospace; text-align: center; margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
         
-        #cam-container { flex-grow: 1; position: relative; overflow: hidden; }
-        /* CSS scales the video to look full screen, but internal resolution is low for speed */
+        #cam-container { flex-grow: 1; position: relative; }
         canvas { width: 100%; height: 100%; object-fit: cover; }
         
-        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; p-2; text-align: left; pointer-events: none; }
-        #fps { background: rgba(0,0,0,0.7); color: #0f0; padding: 5px; font-weight: bold; display: inline-block; margin: 5px; border: 1px solid #0f0; }
+        /* The Manual Alignment Overlay */
+        #guide {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 80vw; height: 80vw; /* Square */
+            border: 2px solid #f00;
+            display: grid;
+            grid-template-columns: repeat(30, 1fr);
+            grid-template-rows: repeat(30, 1fr);
+            opacity: 0.5;
+            pointer-events: none;
+        }
+        /* Only draw some grid lines to keep view clear */
+        .g-cell { border: 0.5px solid rgba(255, 0, 0, 0.2); }
 
-        #controls { background: #222; padding: 15px; border-top: 1px solid #444; }
-        select { width: 100%; padding: 10px; background: #333; color: white; border: 1px solid #0f0; font-size: 16px; margin-bottom: 10px; }
-        button { width: 100%; padding: 15px; background: #0f0; color: #000; font-weight: bold; border: none; font-size: 18px; }
-        
+        #controls { background: #222; padding: 10px; border-top: 1px solid #444; }
         #debug-bar { height: 5px; width: 0%; background: #0f0; transition: width 0.1s; margin: 5px auto; }
-        #status { margin-top: 5px; color: #aaa; font-size: 12px; }
+        button { width: 100%; padding: 15px; background: #0f0; font-weight: bold; border: none; }
+        select { width: 100%; padding: 10px; margin-bottom: 5px; background: #333; color: white; }
     </style>
 </head>
 <body>
 
     <div id="cam-container">
         <canvas id="canvas"></canvas>
-        <div id="ui-layer">
-            <div id="fps">FPS: 0</div>
-        </div>
+        <div id="guide">
+            </div>
     </div>
 
     <div id="controls">
         <div style="width:100%; background:#444; height:5px;"><div id="debug-bar"></div></div>
-        
-        <label style="display:block; text-align: left; margin: 5px 0; color: #fff;">Select Camera:</label>
-        <select id="camSelect"><option>Default Camera</option></select>
-        
-        <button id="btn">TAP TO START</button>
-        <div id="status">Ready</div>
+        <select id="camSelect"><option>Default Cam</option></select>
+        <button id="btn">START MATRIX</button>
+        <div id="status">Align Red Grid to Monitor</div>
     </div>
 
     <script>
         const canvas = document.getElementById("canvas");
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        const guide = document.getElementById("guide");
         const status = document.getElementById("status");
         const debugBar = document.getElementById("debug-bar");
         const camSelect = document.getElementById("camSelect");
-        const fpsDisp = document.getElementById("fps");
-        
+
         // ADPCM Config
         let decoderIndex = 0; let decoderPred = 0;
         const stepTable = [7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,599,659,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767];
         const indexTable = [-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8];
 
+        // Init Grid Guide
+        for(let i=0; i<900; i++) {
+            const d = document.createElement('div');
+            d.className = 'g-cell';
+            guide.appendChild(d);
+        }
+
         let audioCtx;
         let nextTime = 0;
-        let lastId = -1;
-        let currentStream = null;
-        
-        // FPS Logic
-        let lastTime = 0;
-        let frameCount = 0;
+        let lastPacketId = -1;
 
         document.getElementById('btn').onclick = async () => {
             document.getElementById('btn').style.display = 'none';
             audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
-            if (audioCtx.state === 'suspended') await audioCtx.resume();
-
-            await startCamera(); 
-            populateCameraList();
-        };
-
-        async function populateCameraList() {
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            const videoDevices = devices.filter(device => device.kind === 'videoinput');
-            if(videoDevices.length > 0) {
-                camSelect.innerHTML = '';
-                videoDevices.forEach((device, index) => {
-                    const option = document.createElement('option');
-                    option.value = device.deviceId;
-                    option.text = device.label || `Camera ${index + 1}`;
-                    camSelect.appendChild(option);
-                });
-            }
-        }
-
-        camSelect.onchange = () => {
-            if(currentStream) {
-                currentStream.getTracks().forEach(track => track.stop());
-                startCamera(camSelect.value);
-            }
+            await startCamera();
+            populateCameras();
         };
 
         async function startCamera(deviceId) {
-            const constraints = { 
-                video: { 
-                    deviceId: deviceId ? { exact: deviceId } : undefined,
-                    facingMode: deviceId ? undefined : "environment",
-                    // OPTIMIZATION: Request lower resolution (VGA)
-                    // This makes scanning 3x faster than HD
-                    width: { ideal: 640 }, 
-                    height: { ideal: 480 },
-                    focusMode: "continuous"
-                } 
-            };
-            
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
-                currentStream = stream;
-                const video = document.createElement("video");
-                video.srcObject = stream;
-                video.setAttribute("playsinline", true);
-                video.play();
-                requestAnimationFrame(() => tick(video));
-                status.innerText = "Scanning...";
-            } catch(e) {
-                alert("Camera Error: " + e.message);
-            }
+            const constraints = { video: { deviceId: deviceId ? {exact:deviceId}:undefined, facingMode: "environment", width: {ideal:640}, height: {ideal:480}, focusMode: "continuous" } };
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            const video = document.createElement("video");
+            video.srcObject = stream;
+            video.setAttribute("playsinline", true);
+            video.play();
+            requestAnimationFrame(() => tick(video));
         }
 
-        function decodeADPCM(bytes) {
-            const samples = [];
-            for(let i=0; i<bytes.length; i++) {
-                const byte = bytes[i];
-                processNibble((byte >> 4) & 0xF, samples);
-                processNibble(byte & 0xF, samples);
+        async function populateCameras() {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const cams = devices.filter(d => d.kind === 'videoinput');
+            camSelect.innerHTML = '';
+            cams.forEach(c => {
+                const opt = document.createElement('option');
+                opt.value = c.deviceId;
+                opt.text = c.label || "Camera";
+                camSelect.appendChild(opt);
+            });
+            camSelect.onchange = () => startCamera(camSelect.value);
+        }
+
+        // Color Decoder: RGB -> 3-bit Value (0-7)
+        function getColorVal(r, g, b) {
+            // Simple threshold: > 100 is ON, < 100 is OFF
+            const R = r > 100 ? 1 : 0;
+            const G = g > 100 ? 1 : 0;
+            const B = b > 100 ? 1 : 0;
+            // Map: Blue=4, Green=2, Red=1 (Matches standard RGB ordering in int)
+            // Wait, Transmitter used: COLORS array index.
+            // COLORS = [Black(0), Red(1), Green(2), Blue(3)...] -> Wait, check transmitter order.
+            // Transmitter: Black, Red, Green, Blue, Yellow...
+            // Hex: 000, F00, 0F0, 00F, FF0, 0FF, F0F, FFF
+            // Binary: 000, 100, 010, 001, 110, 011, 101, 111 (Assuming R,G,B bits)
+            
+            // Let's reverse engineer standard bitmask: 
+            // Bit 2: Red? Bit 1: Green? Bit 0: Blue?
+            // If R=1, G=0, B=0 -> Red.
+            // Transmitter logic needs to match.
+            // Let's assume standard RGB bits.
+            // Val = (R<<2) | (G<<1) | B
+            return (R << 2) | (G << 1) | B; 
+        }
+
+        // NOTE: Transmitter array was:
+        // 0:000, 1:F00, 2:0F0, 3:00F, 4:FF0, 5:0FF, 6:F0F, 7:FFF
+        // So:
+        // 1 = Red (R=1, G=0, B=0) -> My logic: 100 (4). Mismatch.
+        // Let's adjust my logic to match transmitter array index:
+        // R=1,G=0,B=0 -> Index 1
+        // R=0,G=1,B=0 -> Index 2
+        // R=0,G=0,B=1 -> Index 3
+        // R=1,G=1,B=0 -> Index 4 (Yellow)
+        // R=0,G=1,B=1 -> Index 5 (Cyan)
+        // R=1,G=0,B=1 -> Index 6 (Magenta)
+        // R=1,G=1,B=1 -> Index 7 (White)
+        
+        function matchColor(r,g,b) {
+            const isR = r > 80; const isG = g > 80; const isB = b > 80;
+            if(!isR && !isG && !isB) return 0; // Black
+            if(isR && !isG && !isB) return 1;  // Red
+            if(!isR && isG && !isB) return 2;  // Green
+            if(!isR && !isG && isB) return 3;  // Blue
+            if(isR && isG && !isB) return 4;   // Yellow
+            if(!isR && isG && isB) return 5;   // Cyan
+            if(isR && !isG && isB) return 6;   // Magenta
+            if(isR && isG && isB) return 7;    // White
+            return 0; // Fallback
+        }
+
+        function tick(video) {
+            requestAnimationFrame(() => tick(video));
+            if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
+            
+            // Draw Video
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0);
+            
+            // MANUAL ALIGNMENT LOGIC
+            // We assume the user has aligned the Red Grid (which covers 80% of screen center)
+            // with the monitor image.
+            // So we sample 30x30 points within that 80% box.
+            
+            const boxW = canvas.width * 0.8;
+            const boxH = boxW; // Square
+            const startX = (canvas.width - boxW) / 2;
+            const startY = (canvas.height - boxH) / 2;
+            const cellW = boxW / 30;
+            const cellH = boxH / 30;
+            
+            const imgData = ctx.getImageData(0,0, canvas.width, canvas.height).data;
+            const gridVals = [];
+            
+            // Sample Center of Each Cell
+            for(let y=0; y<30; y++) {
+                for(let x=0; x<30; x++) {
+                    const cx = Math.floor(startX + (x * cellW) + (cellW/2));
+                    const cy = Math.floor(startY + (y * cellH) + (cellH/2));
+                    
+                    const idx = (cy * canvas.width + cx) * 4;
+                    const r = imgData[idx];
+                    const g = imgData[idx+1];
+                    const b = imgData[idx+2];
+                    
+                    gridVals.push(matchColor(r,g,b));
+                }
             }
-            return new Float32Array(samples);
+            
+            processFrame(gridVals);
+        }
+
+        function processFrame(vals) {
+            // 1. Read Header
+            const packetId = vals[0];
+            
+            // De-bouncing: Only process if ID changed
+            if (packetId === lastPacketId) return;
+            lastPacketId = packetId;
+            
+            // Visual Flash
+            debugBar.style.width = "100%";
+            setTimeout(()=>debugBar.style.width="0%", 50);
+
+            // 2. State Recovery (Predictor)
+            // Cells 1-5 (15 bits)
+            let pVal = 0;
+            pVal |= (vals[1] << 12);
+            pVal |= (vals[2] << 9);
+            pVal |= (vals[3] << 6);
+            pVal |= (vals[4] << 3);
+            pVal |= vals[5];
+            decoderPred = pVal - 32768; // Restore signed value
+
+            // 3. State Recovery (Index)
+            // Cells 6-7 (6 bits)
+            let idxVal = 0;
+            idxVal |= (vals[6] << 3);
+            idxVal |= vals[7];
+            decoderIndex = idxVal;
+
+            // 4. Decode Data (Cells 10+)
+            const samples = [];
+            for(let i=10; i<vals.length; i+=3) {
+                if(i+2 >= vals.length) break;
+                
+                // Reassemble 8-bit value from 3 cells
+                const c1 = vals[i];
+                const c2 = vals[i+1];
+                const c3 = vals[i+2];
+                const val = (c1 << 6) | (c2 << 3) | c3;
+                
+                // Extract 4-bit nibbles
+                const s1 = (val >> 4) & 0xF;
+                const s2 = val & 0xF;
+                
+                processNibble(s1, samples);
+                processNibble(s2, samples);
+            }
+            
+            playChunk(new Float32Array(samples));
         }
 
         function processNibble(code, output) {
@@ -142,82 +251,19 @@
             output.push(decoderPred / 32767);
         }
 
-        function playChunk(float32Data) {
-            debugBar.style.width = "100%";
-            setTimeout(() => { debugBar.style.width = "0%"; }, 100);
-
-            const buffer = audioCtx.createBuffer(1, float32Data.length, 8000);
-            buffer.copyToChannel(float32Data, 0);
+        function playChunk(data) {
+            const buffer = audioCtx.createBuffer(1, data.length, 8000);
+            buffer.copyToChannel(data, 0);
             const source = audioCtx.createBufferSource();
             source.buffer = buffer;
             source.connect(audioCtx.destination);
             
             const now = audioCtx.currentTime;
-            if (nextTime < now) nextTime = now + 0.15; 
+            if (nextTime < now) nextTime = now + 0.05;
             source.start(nextTime);
             nextTime += buffer.duration;
             
-            status.innerText = `Receiving... (T: ${Math.round(now)})`;
-            status.style.color = "#0f0";
-        }
-
-        function tick(video) {
-            requestAnimationFrame(() => tick(video));
-
-            // FPS Counter
-            const now = performance.now();
-            frameCount++;
-            if (now - lastTime >= 1000) {
-                fpsDisp.innerText = `FPS: ${frameCount}`;
-                // Warn if FPS is too low for the audio stream (assuming 15fps transmitter)
-                fpsDisp.style.color = frameCount < 15 ? "red" : "#0f0";
-                frameCount = 0;
-                lastTime = now;
-            }
-
-            if (video.readyState === video.HAVE_ENOUGH_DATA) {
-                // Resize Canvas to match video (but keep it low res)
-                if (canvas.width !== video.videoWidth) {
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                }
-
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                
-                // Get Image Data
-                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                
-                // Scan QR
-                const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
-
-                if (code) {
-                    const parts = code.data.split('|');
-                    if (parts.length === 2) {
-                        const id = parseInt(parts[0].split('-')[0]);
-                        if (id > lastId) {
-                            try {
-                                const bin = atob(parts[1]);
-                                const bytes = new Uint8Array(bin.length);
-                                for(let i=0; i<bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                                playChunk(decodeADPCM(bytes));
-                                lastId = id;
-                            } catch(e) {}
-                        }
-                    }
-                    
-                    // Draw Outline
-                    ctx.strokeStyle = "#0f0";
-                    ctx.lineWidth = 4;
-                    const loc = code.location;
-                    ctx.beginPath();
-                    ctx.moveTo(loc.topLeftCorner.x, loc.topLeftCorner.y);
-                    ctx.lineTo(loc.topRightCorner.x, loc.topRightCorner.y);
-                    ctx.lineTo(loc.bottomRightCorner.x, loc.bottomRightCorner.y);
-                    ctx.lineTo(loc.bottomLeftCorner.x, loc.bottomLeftCorner.y);
-                    ctx.closePath();
-                    ctx.stroke();
-                }
-            }
+            status.innerText = `Playing Packet ${lastPacketId}`;
         }
     </script>
 </body>
