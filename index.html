@@ -1,151 +1,121 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
-        body { background: #111; color: #fff; font-family: monospace; text-align: center; margin: 0; }
-        canvas { width: 100%; height: 50vh; background: #000; }
-        #status { padding: 20px; font-size: 16px; color: #0f0; border-top: 1px solid #333; }
-        #log { font-size: 12px; color: #888; text-align: left; padding: 10px; height: 150px; overflow-y: scroll; }
+        body { background: #222; color: #fff; font-family: sans-serif; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; margin: 0; }
+        #qrcode { background: white; padding: 20px; border: 5px solid #444; margin-top: 20px; }
+        #status { font-size: 20px; margin-top: 20px; color: #0f0; max-width: 80%; word-wrap: break-word; }
+        button { padding: 15px 30px; font-size: 18px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 5px; }
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
-    <div id="status">Waiting for Stream...</div>
-    <div id="log"></div>
+
+    <h2>Digital Audio Transmitter (Header Fix)</h2>
+    <div id="qrcode"></div>
+    <div id="status">Ready to Stream</div>
+    <button id="btn" onclick="initAudio()">START OPUS STREAM</button>
 
     <script>
-        const canvas = document.getElementById("canvas");
-        const ctx = canvas.getContext("2d");
+        const qrContainer = document.getElementById("qrcode");
         const status = document.getElementById("status");
-        const logDiv = document.getElementById("log");
+        let qr = new QRCode(qrContainer, { width: 350, height: 350, correctLevel: QRCode.CorrectLevel.L });
+        
+        // CONFIG
+        const RECORD_INTERVAL = 800; // Increased to 800ms to reduce overhead
+        const QR_SIZE = 350;        // Increased Payload size for efficiency
+        const FPS = 15;             
+        const REDUNDANCY = 2;       // Lower redundancy to catch up with speed
 
-        // Audio Engine
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        let nextPlayTime = 0;
+        let audioStream;
+        let packetQueue = [];
+        let chunkCounter = 0;
 
-        // Buffers
-        let currentChunkID = -1;
-        let receivedParts = {}; // Stores parts of the current chunk
-        let processedChunks = new Set(); // History to avoid re-playing
-
-        function log(msg) {
-            logDiv.innerHTML = `> ${msg}<br>` + logDiv.innerHTML;
-        }
-
-        // Camera Loop
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then((stream) => {
-            const video = document.createElement("video");
-            video.srcObject = stream;
-            video.setAttribute("playsinline", true);
-            video.play();
-            requestAnimationFrame(() => tick(video));
-        });
-
-        function tick(video) {
-            if (video.readyState === video.HAVE_ENOUGH_DATA) {
-                canvas.height = video.videoHeight;
-                canvas.width = video.videoWidth;
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                
-                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
-
-                if (code) {
-                    parsePacket(code.data);
-                    // Draw Green Box
-                    ctx.strokeStyle = "#00FF00";
-                    ctx.lineWidth = 4;
-                    ctx.strokeRect(code.location.topLeftCorner.x, code.location.topLeftCorner.y, 
-                                 code.location.bottomRightCorner.x - code.location.topLeftCorner.x,
-                                 code.location.bottomRightCorner.y - code.location.topLeftCorner.y);
-                }
-            }
-            requestAnimationFrame(() => tick(video));
-        }
-
-        function parsePacket(data) {
-            // Protocol: ID-Part/Total|Data
+        async function initAudio() {
+            const btn = document.getElementById('btn');
             try {
-                const [header, payload] = data.split('|');
-                const [idStr, countStr] = header.split('-');
-                const [partStr, totalStr] = countStr.split('/');
+                btn.style.display = 'none';
+                status.innerText = "Select 'Share Audio' in popup...";
 
-                const id = parseInt(idStr);
-                const part = parseInt(partStr);
-                const total = parseInt(totalStr);
+                const screenStream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
+                const audioTracks = screenStream.getAudioTracks();
+                
+                if (audioTracks.length === 0) throw new Error("No Audio Track! Check 'Share System Audio'.");
 
-                // Ignore if we already played this chunk
-                if (processedChunks.has(id)) return;
+                // Clean Audio Stream
+                audioStream = new MediaStream([audioTracks[0]]);
+                
+                status.innerText = "Transmitting...";
+                
+                // Start the Loop
+                recordSlice();
+                startQRLoop();
 
-                // If this is a new chunk, clear old buffer
-                if (id > currentChunkID) {
-                    currentChunkID = id;
-                    receivedParts = {}; 
-                    status.innerText = `Receiving Chunk ${id}...`;
-                }
+            } catch (err) {
+                console.error(err);
+                status.innerText = "ERROR: " + err.message;
+                btn.style.display = 'block';
+            }
+        }
 
-                // Store Part
-                if (!receivedParts[part]) {
-                    receivedParts[part] = payload;
+        // The "Stop/Start" Loop
+        function recordSlice() {
+            // Create a NEW recorder for every slice
+            const recorder = new MediaRecorder(audioStream);
+            const chunks = [];
+
+            recorder.ondataavailable = e => chunks.push(e.data);
+            
+            recorder.onstop = () => {
+                // Combine parts (usually just one) into a Blob
+                const blob = new Blob(chunks, { type: 'audio/webm;codecs=opus' });
+                processAudioBlob(blob);
+            };
+
+            // Start, wait, stop
+            recorder.start();
+            setTimeout(() => {
+                if(recorder.state === "recording") recorder.stop();
+                recordSlice(); // Recursively call next slice
+            }, RECORD_INTERVAL);
+        }
+
+        function processAudioBlob(blob) {
+            chunkCounter++;
+            const reader = new FileReader();
+            reader.readAsDataURL(blob);
+            reader.onloadend = () => {
+                const base64data = reader.result.split(',')[1]; 
+                const totalPackets = Math.ceil(base64data.length / QR_SIZE);
+                
+                // Optimization: If clip is silent/empty, it's very small. Skip it.
+                if (base64data.length < 100) return; 
+
+                for (let i = 0; i < totalPackets; i++) {
+                    const chunk = base64data.substr(i * QR_SIZE, QR_SIZE);
+                    // ID-Part/Total|Data
+                    const payload = `${chunkCounter}-${i + 1}/${totalPackets}|${chunk}`;
                     
-                    // Check if we have ALL parts
-                    if (Object.keys(receivedParts).length === total) {
-                        finalizeChunk(id, total);
+                    for(let r=0; r<REDUNDANCY; r++) {
+                        packetQueue.push(payload);
                     }
                 }
-            } catch (e) {
-                // Garbage data or scan error
-            }
+            };
         }
 
-        async function finalizeChunk(id, total) {
-            processedChunks.add(id);
-            status.innerText = `Decoding Chunk ${id}...`;
-            log(`Chunk ${id} Complete (${total} packets). Decoding...`);
-
-            // 1. Reassemble Base64
-            let fullBase64 = "";
-            for (let i = 1; i <= total; i++) {
-                fullBase64 += receivedParts[i];
-            }
-
-            // 2. Convert to ArrayBuffer
-            const binaryString = window.atob(fullBase64);
-            const len = binaryString.length;
-            const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-
-            // 3. Decode Opus Audio
-            try {
-                const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer);
-                scheduleAudio(audioBuffer);
-            } catch (e) {
-                log("Decode Error: " + e.message);
-            }
-        }
-
-        function scheduleAudio(buffer) {
-            const source = audioCtx.createBufferSource();
-            source.buffer = buffer;
-            source.connect(audioCtx.destination);
-
-            // "Gapless" Logic:
-            // If the previous chunk is still playing, schedule this one to start right after.
-            // If nothing is playing, start immediately.
-            const now = audioCtx.currentTime;
-            if (nextPlayTime < now) {
-                nextPlayTime = now + 0.1; // Small buffer for instant start
-            }
-
-            source.start(nextPlayTime);
-            nextPlayTime += buffer.duration;
-            
-            status.innerText = "Playing Stream...";
-            status.style.color = "#00FF00";
+        function startQRLoop() {
+            setInterval(() => {
+                if (packetQueue.length > 0) {
+                    const data = packetQueue.shift();
+                    qr.clear();
+                    qr.makeCode(data);
+                    
+                    const info = data.split('|')[0];
+                    status.innerText = `Q: ${packetQueue.length} | Sending: ${info}`;
+                } else {
+                    status.innerText = "Buffering...";
+                }
+            }, 1000 / FPS);
         }
     </script>
 </body>
