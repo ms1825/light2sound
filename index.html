@@ -4,126 +4,148 @@
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { margin: 0; background: #111; color: #fff; font-family: monospace; text-align: center; }
+        body { background: #111; color: #fff; font-family: monospace; text-align: center; margin: 0; }
         canvas { width: 100%; height: 50vh; background: #000; }
-        #stats { padding: 10px; text-align: left; background: #222; margin: 10px; border-radius: 5px; font-size: 14px; }
-        .stat-row { display: flex; justify-content: space-between; border-bottom: 1px solid #444; padding: 5px 0; }
-        .val { color: #0f0; font-weight: bold; }
-        .err { color: #f00; font-weight: bold; }
-        #log { height: 100px; overflow-y: scroll; font-size: 10px; text-align: left; padding: 10px; border-top: 1px solid #444; color: #aaa; }
+        #status { padding: 20px; font-size: 16px; color: #0f0; border-top: 1px solid #333; }
+        #log { font-size: 12px; color: #888; text-align: left; padding: 10px; height: 150px; overflow-y: scroll; }
     </style>
 </head>
 <body>
     <canvas id="canvas"></canvas>
-    
-    <div id="stats">
-        <div class="stat-row"><span>Status:</span> <span id="status">Waiting...</span></div>
-        <div class="stat-row"><span>Packet ID:</span> <span id="lastId" class="val">0</span></div>
-        <div class="stat-row"><span>Throughput:</span> <span id="throughput" class="val">0 B/s</span></div>
-        <div class="stat-row"><span>Success Rate:</span> <span id="successRate" class="val">100%</span></div>
-        <div class="stat-row"><span>Dropped:</span> <span id="dropped" class="err">0</span></div>
-    </div>
-    
-    <div id="log">Log started...<br></div>
+    <div id="status">Waiting for Stream...</div>
+    <div id="log"></div>
 
     <script>
         const canvas = document.getElementById("canvas");
         const ctx = canvas.getContext("2d");
+        const status = document.getElementById("status");
         const logDiv = document.getElementById("log");
-        
-        // Metrics
-        let lastPacketId = -1;
-        let totalBytes = 0;
-        let droppedPackets = 0;
-        let receivedPackets = 0;
-        let startTime = 0;
-        let lastTime = 0;
+
+        // Audio Engine
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let nextPlayTime = 0;
+
+        // Buffers
+        let currentChunkID = -1;
+        let receivedParts = {}; // Stores parts of the current chunk
+        let processedChunks = new Set(); // History to avoid re-playing
 
         function log(msg) {
             logDiv.innerHTML = `> ${msg}<br>` + logDiv.innerHTML;
         }
 
-        // Camera Setup
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then(function(stream) {
+        // Camera Loop
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then((stream) => {
             const video = document.createElement("video");
             video.srcObject = stream;
-            video.setAttribute("playsinline", true); // required to tell iOS safari we don't want fullscreen
+            video.setAttribute("playsinline", true);
             video.play();
-            requestAnimationFrame(tick);
-
-            function tick() {
-                if (video.readyState === video.HAVE_ENOUGH_DATA) {
-                    canvas.height = video.videoHeight;
-                    canvas.width = video.videoWidth;
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    
-                    // Scan for QR
-                    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                    const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
-
-                    if (code) {
-                        handleData(code.data);
-                        // Draw box around QR
-                        ctx.lineWidth = 4;
-                        ctx.strokeStyle = "#00FF00";
-                        ctx.strokeRect(code.location.topLeftCorner.x, code.location.topLeftCorner.y, 
-                                     code.location.bottomRightCorner.x - code.location.topLeftCorner.x,
-                                     code.location.bottomRightCorner.y - code.location.topLeftCorner.y);
-                    }
-                }
-                requestAnimationFrame(tick);
-            }
+            requestAnimationFrame(() => tick(video));
         });
 
-        function handleData(jsonStr) {
+        function tick(video) {
+            if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                canvas.height = video.videoHeight;
+                canvas.width = video.videoWidth;
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                
+                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
+
+                if (code) {
+                    parsePacket(code.data);
+                    // Draw Green Box
+                    ctx.strokeStyle = "#00FF00";
+                    ctx.lineWidth = 4;
+                    ctx.strokeRect(code.location.topLeftCorner.x, code.location.topLeftCorner.y, 
+                                 code.location.bottomRightCorner.x - code.location.topLeftCorner.x,
+                                 code.location.bottomRightCorner.y - code.location.topLeftCorner.y);
+                }
+            }
+            requestAnimationFrame(() => tick(video));
+        }
+
+        function parsePacket(data) {
+            // Protocol: ID-Part/Total|Data
             try {
-                const data = JSON.parse(jsonStr);
-                const currentId = data.id;
+                const [header, payload] = data.split('|');
+                const [idStr, countStr] = header.split('-');
+                const [partStr, totalStr] = countStr.split('/');
 
-                // Ignore duplicate reads of the same frame
-                if (currentId === lastPacketId) return;
+                const id = parseInt(idStr);
+                const part = parseInt(partStr);
+                const total = parseInt(totalStr);
 
-                // Start timer on first packet
-                const now = Date.now();
-                if (startTime === 0) startTime = now;
+                // Ignore if we already played this chunk
+                if (processedChunks.has(id)) return;
 
-                // Check for dropped packets
-                if (lastPacketId !== -1) {
-                    const diff = currentId - lastPacketId;
-                    if (diff > 1) {
-                        const lost = diff - 1;
-                        droppedPackets += lost;
-                        log(`MISSED ${lost} packets (ID ${lastPacketId+1} to ${currentId-1})`);
-                    }
+                // If this is a new chunk, clear old buffer
+                if (id > currentChunkID) {
+                    currentChunkID = id;
+                    receivedParts = {}; 
+                    status.innerText = `Receiving Chunk ${id}...`;
                 }
 
-                // Update Stats
-                lastPacketId = currentId;
-                receivedPackets++;
-                totalBytes += jsonStr.length; // Approximate raw throughput
-
-                // Calculate B/s (Moving average window could be better, but this is simple)
-                const elapsedSeconds = (now - startTime) / 1000;
-                const bps = Math.round(totalBytes / elapsedSeconds);
-                const kbps = (bps / 1024).toFixed(2);
-                
-                // Calculate Success Rate
-                const totalSent = (receivedPackets + droppedPackets);
-                const rate = Math.round((receivedPackets / totalSent) * 100);
-
-                // Update UI
-                document.getElementById("status").innerText = "Receiving...";
-                document.getElementById("lastId").innerText = currentId;
-                document.getElementById("throughput").innerText = `${bps} B/s (${kbps} KB/s)`;
-                document.getElementById("successRate").innerText = `${rate}%`;
-                document.getElementById("dropped").innerText = droppedPackets;
-                
-                // Reset color if receiving
-                document.getElementById("status").style.color = "#0f0";
-
+                // Store Part
+                if (!receivedParts[part]) {
+                    receivedParts[part] = payload;
+                    
+                    // Check if we have ALL parts
+                    if (Object.keys(receivedParts).length === total) {
+                        finalizeChunk(id, total);
+                    }
+                }
             } catch (e) {
-                // Not our JSON
+                // Garbage data or scan error
             }
+        }
+
+        async function finalizeChunk(id, total) {
+            processedChunks.add(id);
+            status.innerText = `Decoding Chunk ${id}...`;
+            log(`Chunk ${id} Complete (${total} packets). Decoding...`);
+
+            // 1. Reassemble Base64
+            let fullBase64 = "";
+            for (let i = 1; i <= total; i++) {
+                fullBase64 += receivedParts[i];
+            }
+
+            // 2. Convert to ArrayBuffer
+            const binaryString = window.atob(fullBase64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            // 3. Decode Opus Audio
+            try {
+                const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer);
+                scheduleAudio(audioBuffer);
+            } catch (e) {
+                log("Decode Error: " + e.message);
+            }
+        }
+
+        function scheduleAudio(buffer) {
+            const source = audioCtx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioCtx.destination);
+
+            // "Gapless" Logic:
+            // If the previous chunk is still playing, schedule this one to start right after.
+            // If nothing is playing, start immediately.
+            const now = audioCtx.currentTime;
+            if (nextPlayTime < now) {
+                nextPlayTime = now + 0.1; // Small buffer for instant start
+            }
+
+            source.start(nextPlayTime);
+            nextPlayTime += buffer.duration;
+            
+            status.innerText = "Playing Stream...";
+            status.style.color = "#00FF00";
         }
     </script>
 </body>
