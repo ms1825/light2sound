@@ -3,30 +3,24 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>RGB Vocoder Receiver</title>
+    <title>Deep Robot Receiver</title>
     <style>
         body { margin: 0; background: #000; color: #fff; font-family: monospace; text-align: center; }
-        video { width: 100%; height: 60vh; object-fit: cover; }
-        .guide { position: absolute; top: 30vh; left: 50%; transform: translateX(-50%); width: 80px; height: 80px; border: 4px solid white; z-index: 10; box-shadow: 0 0 15px rgba(255,255,255,0.5); }
-        #bars { display: flex; justify-content: center; height: 100px; gap: 10px; margin-top: 20px; }
-        .bar { width: 30px; background: #333; display: flex; align-items: flex-end; }
-        .fill { width: 100%; background: grey; height: 0%; transition: height 0.05s; }
-        button { font-size: 20px; padding: 15px; margin-top: 10px; background: #444; color: white; border: none; }
+        video { width: 100%; height: 60vh; object-fit: cover; filter: contrast(1.2); } /* Boost contrast for better detection */
+        .guide { position: absolute; top: 30vh; left: 50%; transform: translateX(-50%); width: 80px; height: 80px; border: 4px solid #0f0; z-index: 10; }
+        #fps { position: absolute; top: 10px; left: 10px; color: yellow; font-size: 20px; font-weight: bold; background: rgba(0,0,0,0.5); padding: 5px; }
+        #status { font-size: 14px; margin-top: 10px; color: #aaa; }
+        button { font-size: 20px; padding: 20px; width: 80%; margin-top: 10px; background: #0f0; color: black; border: none; font-weight: bold; }
     </style>
 </head>
 <body>
 
+    <div id="fps">FPS: 0</div>
     <div class="guide"></div>
     <video id="video" autoplay playsinline muted></video>
 
-    <div id="bars">
-        <div class="bar" style="border: 1px solid red;"><div id="r-fill" class="fill" style="background: red;"></div></div>
-        <div class="bar" style="border: 1px solid green;"><div id="g-fill" class="fill" style="background: green;"></div></div>
-        <div class="bar" style="border: 1px solid blue;"><div id="b-fill" class="fill" style="background: cyan;"></div></div>
-    </div>
-
-    <button id="startBtn">START DECODER</button>
-    <div id="console"></div>
+    <div id="status">Align Green Box to Screen</div>
+    <button id="startBtn">START RECEIVER</button>
 
     <canvas id="canvas" style="display:none;"></canvas>
 
@@ -34,28 +28,30 @@
         const startBtn = document.getElementById('startBtn');
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
+        const fpsDisplay = document.getElementById('fps');
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         
         let audioCtx;
-        // We need 3 oscillators and 3 gain nodes
         const synths = {
-            bass: { osc: null, gain: null, freq: 100 },  // Low Drone
-            mid:  { osc: null, gain: null, freq: 500 },  // Voice range
-            high: { osc: null, gain: null, freq: 2500 }  // Hiss/Static
+            bass: { osc: null, gain: null, freq: 55 },  // Deep A1
+            mid:  { osc: null, gain: null, freq: 110 }, // A2
+            high: { osc: null, gain: null, freq: 165 }  // E2 (Harmonic)
         };
+
+        let lastTime = 0;
+        let frameCount = 0;
 
         startBtn.addEventListener('click', async () => {
             startBtn.style.display = 'none';
             audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
-            // Setup the 3 voices
             Object.keys(synths).forEach(key => {
                 const s = synths[key];
                 s.osc = audioCtx.createOscillator();
                 s.gain = audioCtx.createGain();
                 
-                // Use Sawtooth for a buzzier, richer sound (better for vocoder feel)
-                s.osc.type = 'sawtooth'; 
+                // Triangle wave is softer/flutey-er than Sawtooth
+                s.osc.type = 'triangle'; 
                 s.osc.frequency.value = s.freq;
                 s.gain.gain.value = 0;
 
@@ -65,9 +61,23 @@
             });
 
             try {
+                // Try to force 60fps
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment', frameRate: { ideal: 60 } }, audio: false
+                    video: { 
+                        facingMode: 'environment', 
+                        width: { ideal: 640 }, // Lower res = faster processing
+                        frameRate: { ideal: 60, min: 30 } 
+                    }, 
+                    audio: false
                 });
+                
+                // Hack to lock exposure on Android (Chrome) if supported
+                const track = stream.getVideoTracks()[0];
+                const capabilities = track.getCapabilities();
+                if (capabilities.exposureMode) {
+                   try { await track.applyConstraints({ advanced: [{ exposureMode: "continuous" }] }); } catch(e){}
+                }
+
                 video.srcObject = stream;
                 processFrame();
             } catch (e) {
@@ -75,8 +85,19 @@
             }
         });
 
-        function processFrame() {
+        function processFrame(time) {
             requestAnimationFrame(processFrame);
+            
+            // FPS Counter
+            if (time - lastTime >= 1000) {
+                fpsDisplay.innerText = "FPS: " + frameCount;
+                if(frameCount < 50) fpsDisplay.style.color = "red"; // Warn if low FPS
+                else fpsDisplay.style.color = "#0f0";
+                frameCount = 0;
+                lastTime = time;
+            }
+            frameCount++;
+
             if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
 
             if (canvas.width !== video.videoWidth) {
@@ -86,39 +107,32 @@
 
             ctx.drawImage(video, 0, 0);
 
-            // Read center pixels
-            const size = 40;
+            // Read center pixels (smaller sample area = faster)
+            const size = 20;
             const cx = (canvas.width / 2) - (size/2);
             const cy = (canvas.height / 2) - (size/2);
             const frame = ctx.getImageData(cx, cy, size, size).data;
 
-            let rTotal = 0, gTotal = 0, bTotal = 0;
-            let count = 0;
+            let rTotal = 0, gTotal = 0, bTotal = 0, count = 0;
 
-            for (let i = 0; i < frame.length; i += 16) {
+            // Skip pixels to run faster (Sample every 8th pixel)
+            for (let i = 0; i < frame.length; i += 32) {
                 rTotal += frame[i];
                 gTotal += frame[i+1];
                 bTotal += frame[i+2];
                 count++;
             }
 
-            // Normalize (0.0 to 1.0)
             const r = (rTotal / count) / 255;
             const g = (gTotal / count) / 255;
             const b = (bTotal / count) / 255;
 
-            // Visual feedback
-            document.getElementById('r-fill').style.height = (r * 100) + "%";
-            document.getElementById('g-fill').style.height = (g * 100) + "%";
-            document.getElementById('b-fill').style.height = (b * 100) + "%";
-
-            // Audio Mixing (Noise Gate at 0.1 to stop humming when dark)
+            // Audio Mixing with "Slew" (Smoothing)
+            // The '0.1' is the time constant. Increase to 0.2 for smoother (but laggier) sound.
             const now = audioCtx.currentTime;
-            const ramp = 0.05; // Smooth transitions
-
-            synths.bass.gain.gain.setTargetAtTime(r > 0.1 ? r : 0, now, ramp);
-            synths.mid.gain.gain.setTargetAtTime(g > 0.1 ? g : 0, now, ramp);
-            synths.high.gain.gain.setTargetAtTime(b > 0.1 ? b * 0.5 : 0, now, ramp); // Highs are piercing, so lower volume
+            synths.bass.gain.gain.setTargetAtTime(r * 2.0, now, 0.1); 
+            synths.mid.gain.gain.setTargetAtTime(g * 1.5, now, 0.1);
+            synths.high.gain.gain.setTargetAtTime(b * 1.0, now, 0.1);
         }
     </script>
 </body>
