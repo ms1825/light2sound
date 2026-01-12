@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<body style="background: black; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; overflow: hidden;">
+    <div id="light" style="width: 200px; height: 200px; background: white; border-radius: 10px;"></div>
+    <button id="start" style="position: absolute; padding: 20px;">Start Capturing Audio</button>
+
+    <script>
+        const light = document.getElementById('light');
+        const startBtn = document.getElementById('start');
+
+        startBtn.onclick = async () => {
+            // Captures system audio via screen sharing stream
+            const stream = await navigator.mediaDevices.getDisplayMedia({
+                video: true, audio: true
+            });
+            startBtn.style.display = 'none';
+
+            const audioContext = new AudioContext();
+            const source = audioContext.createMediaStreamSource(stream);
+            const analyzer = audioContext.createAnalyser();
+            analyzer.fftSize = 256;
+            source.connect(analyzer);
+
+            const dataArray = new Uint8Array(analyzer.frequencyBinCount);
+
+            function draw() {
+                analyzer.getByteFrequencyData(dataArray);
+                // Get average volume (roughly)
+                let avg = dataArray.reduce((a, b) => a + b) / dataArray.length;
+                // Amplify the effect for the light
+                let brightness = Math.min(255, avg * 3);
+                light.style.backgroundColor = `rgb(${brightness}, ${brightness}, ${brightness})`;
+                requestAnimationFrame(draw);
+            }
+            draw();
+        };
+    </script>
+</body>
+</html>
+
