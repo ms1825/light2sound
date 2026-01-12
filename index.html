@@ -3,117 +3,145 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>3-Channel Spatial Receiver</title>
+    <title>5-Channel Receiver</title>
     <style>
-        body { margin: 0; background: #000; color: #fff; font-family: monospace; text-align: center; }
-        video { width: 100%; height: 60vh; object-fit: cover; }
+        body { margin: 0; background: #000; color: #0f0; font-family: monospace; overflow: hidden; }
+        video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
         
-        /* The Alignment Guide */
-        .guide-container { 
-            position: absolute; top: 30vh; left: 50%; transform: translateX(-50%); 
-            display: flex; gap: 5px; opacity: 0.7; pointer-events: none;
-        }
-        .guide-box { width: 30px; height: 80px; border: 2px solid white; }
+        /* Overlay Canvas for drawing the alignment boxes */
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
         
-        #status { margin-top: 10px; color: #aaa; }
-        button { font-size: 18px; padding: 15px; margin-top: 10px; background: #0f0; border: none; }
+        #ui { position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(0,0,0,0.5); padding: 5px; pointer-events: none; }
+        #startBtn { position: absolute; bottom: 50px; left: 50%; transform: translateX(-50%); padding: 20px 40px; font-size: 20px; font-weight: bold; background: #0f0; border: none; cursor: pointer; z-index: 20; }
     </style>
 </head>
 <body>
 
-    <div class="guide-container">
-        <div class="guide-box" style="border-color: red;"></div>
-        <div class="guide-box" style="border-color: green;"></div>
-        <div class="guide-box" style="border-color: cyan;"></div>
-    </div>
-    
     <video id="video" autoplay playsinline muted></video>
-    <div id="status">Align the 3 bars inside the 3 boxes</div>
-    <button id="startBtn">START RECEIVER</button>
-    <canvas id="canvas" style="display:none;"></canvas>
+    <canvas id="overlay"></canvas>
+    
+    <div id="ui">
+        <div id="fps">FPS: 0</div>
+        <div id="status">Waiting...</div>
+    </div>
+
+    <button id="startBtn">ACTIVATE 5-CH SYSTEM</button>
+
+    <canvas id="proc" style="display:none;"></canvas>
 
     <script>
-        const startBtn = document.getElementById('startBtn');
         const video = document.getElementById('video');
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const overlay = document.getElementById('overlay');
+        const overlayCtx = overlay.getContext('2d');
+        const proc = document.getElementById('proc');
+        const ctx = proc.getContext('2d', { willReadFrequently: true });
+        const fpsDisp = document.getElementById('fps');
         
         let audioCtx;
-        const synths = {
-            bass: { osc: null, gain: null, freq: 65 },  
-            mid:  { osc: null, gain: null, freq: 130 }, 
-            high: { osc: null, gain: null, freq: 195 }  
-        };
+        // Pentatonic Scale (Harmonious robot sounds)
+        // frequencies: 55(A1), 69(C#2), 82(E2), 110(A2), 138(C#3)
+        const freqs = [55, 69, 82, 110, 138]; 
+        const synths = [];
 
-        startBtn.addEventListener('click', async () => {
-            startBtn.style.display = 'none';
+        let lastTime = 0;
+        let frames = 0;
+
+        document.getElementById('startBtn').addEventListener('click', async () => {
+            document.getElementById('startBtn').style.display = 'none';
+            document.getElementById('status').innerText = "Running...";
+
+            // Init Audio
             audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            for(let i=0; i<5; i++) {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'triangle'; // Softer tone
+                osc.frequency.value = freqs[i];
+                gain.gain.value = 0;
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start();
+                synths.push({osc, gain});
+            }
 
-            Object.keys(synths).forEach(key => {
-                const s = synths[key];
-                s.osc = audioCtx.createOscillator();
-                s.gain = audioCtx.createGain();
-                s.osc.type = 'triangle'; 
-                s.osc.frequency.value = s.freq;
-                s.gain.gain.value = 0;
-                s.osc.connect(s.gain);
-                s.gain.connect(audioCtx.destination);
-                s.osc.start();
-            });
-
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: 'environment', width: { ideal: 1280 }, frameRate: { ideal: 60 } }, audio: false
-            });
-            video.srcObject = stream;
-            processFrame();
+            // Init Camera
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment', width: { ideal: 1280 }, frameRate: { ideal: 60 } }, audio: false
+                });
+                video.srcObject = stream;
+                
+                // Start Loop
+                requestAnimationFrame(loop);
+            } catch(e) {
+                alert("Camera Error: " + e.message);
+            }
         });
 
-        function processFrame() {
-            requestAnimationFrame(processFrame);
+        function loop(time) {
+            requestAnimationFrame(loop);
+
+            // FPS Calculation
+            if(time - lastTime >= 1000) {
+                fpsDisp.innerText = `FPS: ${frames}`;
+                fpsDisp.style.color = frames < 50 ? 'red' : '#0f0';
+                frames = 0;
+                lastTime = time;
+            }
+            frames++;
+
             if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
 
-            if (canvas.width !== video.videoWidth) {
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
+            // Resize canvases to match video stream
+            if (proc.width !== video.videoWidth) {
+                proc.width = video.videoWidth;
+                proc.height = video.videoHeight;
+                overlay.width = video.videoWidth;
+                overlay.height = video.videoHeight;
             }
+
+            // 1. Draw Video to Processing Canvas
             ctx.drawImage(video, 0, 0);
 
-            // We need to sample 3 separate areas
-            const w = canvas.width;
-            const h = canvas.height;
-            const boxW = 20; // Sample size
-            
-            // Calculate center points for Left, Middle, Right (Assuming guide is centered)
-            // You might need to adjust 'offset' depending on how far apart your PC bars are physically
-            // Relative to the camera view, we assume they are clustered in the center
-            const spacing = w * 0.08; // Distance between sample points (Adjust this if bars are too far/close)
-            
-            const leftX  = (w/2) - spacing;
-            const midX   = (w/2);
-            const rightX = (w/2) + spacing;
-            const sampleY = h/2;
+            // 2. Define the 5 Zones (Horizontal spread)
+            const w = proc.width;
+            const h = proc.height;
+            const zoneW = w / 7; // Divide screen roughly into slots
+            const startX = zoneW; // Start slightly in
+            const sampleY = h / 2;
+            const sampleH = h / 4;
 
-            function getBrightness(x, y) {
-                const img = ctx.getImageData(x - 10, y - 40, 20, 80).data; // Sample a vertical strip
-                let sum = 0;
-                // Sample only the Green channel for simplicity (since it carries brightness well for all colors in YUV)
-                // OR sample RGB specific channels for maximum precision
-                for(let i=0; i<img.length; i+=4) {
-                    sum += img[i] + img[i+1] + img[i+2];
+            // Clear Overlay
+            overlayCtx.clearRect(0, 0, w, h);
+            overlayCtx.strokeStyle = "red";
+            overlayCtx.lineWidth = 4;
+
+            // 3. Process Each Zone
+            for(let i=0; i<5; i++) {
+                // Calculate position for this zone
+                const x = startX + (i * zoneW);
+                const y = sampleY - (sampleH/2);
+                
+                // Draw Debug Box on Overlay
+                overlayCtx.strokeRect(x, y, zoneW*0.8, sampleH);
+
+                // Read Pixel Data (Sample vertical strip inside the box)
+                // We take a smaller sample from the center of the box to be safe
+                const imgData = ctx.getImageData(x + (zoneW*0.4), y, 2, sampleH).data;
+                
+                let total = 0;
+                for(let p=0; p<imgData.length; p+=4) {
+                    total += imgData[p] + imgData[p+1] + imgData[p+2];
                 }
-                return (sum / (img.length/4)) / (255*3);
+                
+                // Normalize 0.0 - 1.0
+                // Max possible = 255 * 3 * numPixels
+                const brightness = total / ((imgData.length/4) * 765);
+
+                // Audio Mapping
+                // Use "Slew" (0.1s) to smooth out the 60hz flicker
+                synths[i].gain.gain.setTargetAtTime(brightness * 2.0, audioCtx.currentTime, 0.1);
             }
-
-            // Get brightness of the 3 zones
-            const bVal = getBrightness(leftX, sampleY);
-            const mVal = getBrightness(midX, sampleY);
-            const hVal = getBrightness(rightX, sampleY);
-
-            // Audio Mapping
-            const now = audioCtx.currentTime;
-            synths.bass.gain.gain.setTargetAtTime(bVal * 2, now, 0.05); 
-            synths.mid.gain.gain.setTargetAtTime(mVal * 1.5, now, 0.05);
-            synths.high.gain.gain.setTargetAtTime(hVal * 1.0, now, 0.05);
         }
     </script>
 </body>
